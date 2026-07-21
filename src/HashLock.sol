@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {SafeTransfer} from "./lib/SafeTransfer.sol";
+
 /// @title HashLock
 /// @notice Hash time-locked contract for trustless cross-chain atomic swaps.
 /// @dev A swap locks funds that can be claimed by `redeemer` by revealing the
 ///      preimage of `secretHash`, or reclaimed by `initiator` once `expiry` passes.
 ///      The same secret unlocks the counter-leg on the other chain, which is what
 ///      makes the swap atomic: revealing it to claim one side publishes it for the other.
+///      `token == address(0)` denotes the chain's native asset.
 contract HashLock {
+    using SafeTransfer for address;
+
+    address public constant NATIVE = address(0);
+
     struct Swap {
         address initiator;
         uint64 expiry;
         bool settled;
         address redeemer;
+        address token;
         uint256 amount;
         bytes32 secretHash;
     }
@@ -23,8 +31,9 @@ contract HashLock {
         bytes32 indexed swapId,
         address indexed initiator,
         address indexed redeemer,
-        bytes32 secretHash,
+        address token,
         uint256 amount,
+        bytes32 secretHash,
         uint64 expiry
     );
     event Redeemed(bytes32 indexed swapId, bytes32 indexed secretHash, bytes secret);
@@ -33,24 +42,30 @@ contract HashLock {
     error ZeroAddress();
     error ZeroAmount();
     error InvalidExpiry();
+    error InvalidValue();
     error SwapExists();
     error SwapNotFound();
     error AlreadySettled();
     error InvalidSecret();
     error NotExpired();
-    error TransferFailed();
 
-    /// @notice Lock native ETH for `redeemer` until `expiry`.
-    function initiate(address redeemer, bytes32 secretHash, uint64 expiry, bytes32 salt)
-        external
-        payable
-        returns (bytes32 swapId)
-    {
+    /// @notice Lock `amount` of `token` for `redeemer` until `expiry`.
+    /// @dev For native swaps `msg.value` must equal `amount`; for ERC20 it must be zero
+    ///      and the caller must have approved this contract.
+    function initiate(
+        address redeemer,
+        address token,
+        uint256 amount,
+        bytes32 secretHash,
+        uint64 expiry,
+        bytes32 salt
+    ) external payable returns (bytes32 swapId) {
         if (redeemer == address(0)) revert ZeroAddress();
-        if (msg.value == 0) revert ZeroAmount();
+        if (amount == 0) revert ZeroAmount();
         if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (msg.value != (token == NATIVE ? amount : 0)) revert InvalidValue();
 
-        swapId = computeSwapId(msg.sender, redeemer, secretHash, msg.value, expiry, salt);
+        swapId = computeSwapId(msg.sender, redeemer, token, amount, secretHash, expiry, salt);
         if (swaps[swapId].initiator != address(0)) revert SwapExists();
 
         swaps[swapId] = Swap({
@@ -58,11 +73,14 @@ contract HashLock {
             expiry: expiry,
             settled: false,
             redeemer: redeemer,
-            amount: msg.value,
+            token: token,
+            amount: amount,
             secretHash: secretHash
         });
 
-        emit Initiated(swapId, msg.sender, redeemer, secretHash, msg.value, expiry);
+        emit Initiated(swapId, msg.sender, redeemer, token, amount, secretHash, expiry);
+
+        if (token != NATIVE) token.safeTransferFrom(msg.sender, address(this), amount);
     }
 
     /// @notice Release funds to the redeemer by revealing the secret.
@@ -73,7 +91,7 @@ contract HashLock {
 
         s.settled = true;
         emit Redeemed(swapId, s.secretHash, secret);
-        _send(s.redeemer, s.amount);
+        _payout(s.token, s.redeemer, s.amount);
     }
 
     /// @notice Return funds to the initiator after expiry.
@@ -83,20 +101,29 @@ contract HashLock {
 
         s.settled = true;
         emit Refunded(swapId);
-        _send(s.initiator, s.amount);
+        _payout(s.token, s.initiator, s.amount);
     }
 
     function computeSwapId(
         address initiator,
         address redeemer,
-        bytes32 secretHash,
+        address token,
         uint256 amount,
+        bytes32 secretHash,
         uint64 expiry,
         bytes32 salt
     ) public view returns (bytes32) {
         return keccak256(
             abi.encode(
-                block.chainid, address(this), initiator, redeemer, secretHash, amount, expiry, salt
+                block.chainid,
+                address(this),
+                initiator,
+                redeemer,
+                token,
+                amount,
+                secretHash,
+                expiry,
+                salt
             )
         );
     }
@@ -107,8 +134,8 @@ contract HashLock {
         if (s.settled) revert AlreadySettled();
     }
 
-    function _send(address to, uint256 amount) internal {
-        (bool ok,) = to.call{value: amount}("");
-        if (!ok) revert TransferFailed();
+    function _payout(address token, address to, uint256 amount) internal {
+        if (token == NATIVE) to.sendNative(amount);
+        else token.safeTransfer(to, amount);
     }
 }
