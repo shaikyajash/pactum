@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {HashLock} from "../src/HashLock.sol";
+
+contract InstantRefundTest is Test {
+    HashLock internal htlc;
+
+    address internal alice = makeAddr("alice");
+    uint256 internal bobKey = 0xB0B;
+    address internal bob = vm.addr(bobKey);
+
+    bytes32 internal secretHash = sha256("secret");
+    bytes32 internal id;
+
+    function setUp() public {
+        htlc = new HashLock();
+        vm.deal(alice, 10 ether);
+        vm.prank(alice);
+        id = htlc.initiate{value: 1 ether}(
+            bob, address(0), 1 ether, secretHash, uint64(block.timestamp + 1 days), 0
+        );
+    }
+
+    function _sign(uint256 key, bytes32 digest) internal pure returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function test_instantRefund_withRedeemerSignature() public {
+        bytes memory sig = _sign(bobKey, htlc.refundDigest(id));
+        htlc.instantRefund(id, sig);
+        assertEq(alice.balance, 10 ether);
+    }
+
+    function test_instantRefund_rejectsOtherSigner() public {
+        bytes memory sig = _sign(0xBAD, htlc.refundDigest(id));
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        htlc.instantRefund(id, sig);
+    }
+
+    function test_instantRefund_signatureBoundToSwap() public {
+        vm.prank(alice);
+        bytes32 other = htlc.initiate{value: 1 ether}(
+            bob, address(0), 1 ether, secretHash, uint64(block.timestamp + 1 days), bytes32("2")
+        );
+        bytes memory sig = _sign(bobKey, htlc.refundDigest(other));
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        htlc.instantRefund(id, sig);
+    }
+
+    function test_instantRefund_cannotReplay() public {
+        bytes memory sig = _sign(bobKey, htlc.refundDigest(id));
+        htlc.instantRefund(id, sig);
+        vm.expectRevert(HashLock.AlreadySettled.selector);
+        htlc.instantRefund(id, sig);
+    }
+
+    function test_instantRefund_rejectsMalleableSignature() public {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(bobKey, htlc.refundDigest(id));
+        uint256 n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+        bytes32 highS = bytes32(n - uint256(s));
+        uint8 flippedV = v == 27 ? 28 : 27;
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        htlc.instantRefund(id, abi.encodePacked(r, highS, flippedV));
+    }
+
+    function test_instantRefund_rejectsBadLength() public {
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        htlc.instantRefund(id, hex"1234");
+    }
+
+    function test_domainSeparator_chainBound() public {
+        bytes32 before = htlc.domainSeparator();
+        vm.chainId(8453);
+        assertTrue(htlc.domainSeparator() != before);
+    }
+}
