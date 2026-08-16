@@ -1,0 +1,28 @@
+{
+  "chains": [
+    {
+      "id": 11155111,
+      "name": "sepolia",
+      "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
+      "contract": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "id": 84532,
+      "name": "base-sepolia",
+      "rpc": "https://sepolia.base.org",
+      "contract": "0x0000000000000000000000000000000000000000"
+    }
+  ],
+  "routes": [
+    {
+      "srcChainId": 11155111,
+      "srcToken": "0x0000000000000000000000000000000000000000",
+      "dstChainId": 84532,
+      "dstToken": "0x0000000000000000000000000000000000000000",
+      "rateNum": "995",
+      "rateDen": "1000",
+      "minSrc": "1000000000000000",
+      "maxSrc": "1000000000000000000"
+    }
+  ]
+}
