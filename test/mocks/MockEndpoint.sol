@@ -66,9 +66,7 @@ contract MockEndpoint {
         r = MessagingReceipt(guid, nonce, MessagingFee(FEE, 0));
     }
 
-    function enqueue(Origin calldata o, address receiver, bytes32 guid, bytes calldata m)
-        external
-    {
+    function enqueue(Origin calldata o, address receiver, bytes32 guid, bytes calldata m) external {
         inbox.push(Packet(o, receiver, guid, m));
     }
 
