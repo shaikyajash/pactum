@@ -9,7 +9,7 @@ import {HashLock} from "../src/HashLock.sol";
 ///
 ///   forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --account deployer
 contract Deploy is Script {
-    bytes32 internal constant SALT = keccak256("hashlock.v1");
+    bytes32 internal constant SALT = keccak256("pactum.hashlock.v1");
 
     function run() external returns (HashLock htlc) {
         address predicted =
