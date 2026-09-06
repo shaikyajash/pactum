@@ -50,3 +50,36 @@ describe("secret", () => {
     ).toBe(true);
   });
 });
+
+import { acceptableFill } from "../src/client.js";
+
+describe("acceptableFill", () => {
+  const me = "0x00000000000000000000000000000000000000a1" as const;
+  const resolver = "0x00000000000000000000000000000000000000b0" as const;
+  const token = "0x00000000000000000000000000000000000000c0" as const;
+  const secretHash = `0x${"11".repeat(32)}` as const;
+  const ev = {
+    swapId: `0x${"22".repeat(32)}`,
+    initiator: resolver,
+    redeemer: me,
+    token,
+    amount: 100n,
+    secretHash,
+    expiry: 0n,
+    blockNumber: 0n,
+  } as const;
+  const req = { resolver, dstToken: token, minDstAmount: 100n };
+
+  it("accepts a matching fill", () => {
+    expect(acceptableFill(ev, req, me, secretHash)).toBe(true);
+  });
+
+  it.each([
+    ["short amount", { amount: 99n }],
+    ["wrong token", { token: resolver }],
+    ["wrong hash", { secretHash: `0x${"33".repeat(32)}` }],
+    ["not from resolver", { initiator: me }],
+  ])("rejects %s", (_, patch) => {
+    expect(acceptableFill({ ...ev, ...patch } as typeof ev, req, me, secretHash)).toBe(false);
+  });
+});
