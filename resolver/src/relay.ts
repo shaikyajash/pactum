@@ -17,6 +17,8 @@ export interface SignedOrder {
   signature: Hex;
   srcChainId: number;
   contract: Address;
+  /** Public leaf hashes so resolvers can build proofs. Secrets stay with the maker. */
+  secretHashes: Hex[];
 }
 
 interface Entry extends SignedOrder {
@@ -43,6 +45,9 @@ export class RelayServer {
     });
     // EIP-1271 makers are verified on-chain at fill time instead
     if (signer.toLowerCase() !== o.order.maker.toLowerCase()) throw new Error("bad signature");
+    if (new SecretTree(o.secretHashes).root !== o.order.secretsRoot) {
+      throw new Error("secret hashes do not match secretsRoot");
+    }
     const hash = hashOrder(o.order, o.srcChainId, o.contract);
     this.orders.set(hash, { ...o, hash, secrets: new Map() });
     return hash;
