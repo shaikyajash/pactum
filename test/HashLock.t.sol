@@ -48,8 +48,8 @@ contract HashLockTest is Test {
     function test_initiate_storesSwap() public {
         bytes32 id = _initiate(1 ether);
 
-        (address init, uint64 exp, bool settled, address red, address tok, uint256 amt, bytes32 h)
-        = htlc.swaps(id);
+        (address init, uint64 exp, bool settled, address red, address tok, uint256 amt, bytes32 h) =
+            htlc.swaps(id);
         assertEq(tok, address(0));
         assertEq(init, alice);
         assertEq(red, bob);

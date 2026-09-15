@@ -12,9 +12,8 @@ contract Deploy is Script {
     bytes32 internal constant SALT = keccak256("hashlock.v1");
 
     function run() external returns (HashLock htlc) {
-        address predicted = vm.computeCreate2Address(
-            SALT, keccak256(type(HashLock).creationCode), CREATE2_FACTORY
-        );
+        address predicted =
+            vm.computeCreate2Address(SALT, keccak256(type(HashLock).creationCode), CREATE2_FACTORY);
 
         if (predicted.code.length > 0) {
             console2.log("HashLock already deployed at", predicted);

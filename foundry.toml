@@ -14,3 +14,7 @@ fuzz = { runs = 5_000 }
 line_length = 100
 tab_width = 4
 bracket_spacing = false
+
+[invariant]
+runs = 64
+depth = 128
