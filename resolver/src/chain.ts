@@ -71,7 +71,9 @@ export class Chain {
   }
 
   async head(): Promise<bigint> {
-    return this.public.getBlockNumber();
+    // viem caches the block number for the polling interval by default; a stale
+    // head makes log scans silently stop short of the newest blocks
+    return this.public.getBlockNumber({ cacheTime: 0 });
   }
 
   async swap(swapId: Hex): Promise<OnchainSwap> {
