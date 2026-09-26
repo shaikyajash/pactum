@@ -3,5 +3,7 @@
 
 pub mod chain;
 pub mod contracts;
+pub mod maker;
 
 pub use chain::{Chain, ChainConfig, NATIVE};
+pub use maker::{IntentRequest, Maker, OpenIntent};
