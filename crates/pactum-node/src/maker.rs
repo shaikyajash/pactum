@@ -111,8 +111,10 @@ impl Maker {
     /// Release secrets for fills whose destination lock checks out.
     pub async fn tick(&self, intent: &mut OpenIntent) -> anyhow::Result<()> {
         let fills = intent_fills(self, intent).await?;
-        let locks =
-            self.dst.locks_to(intent.order.receiver, intent.dst_from, self.dst.head().await?).await?;
+        let locks = self
+            .dst
+            .locks_to(intent.order.receiver, intent.dst_from, self.dst.head().await?)
+            .await?;
 
         for f in fills {
             if intent.released.contains(&f.secret_index) {
