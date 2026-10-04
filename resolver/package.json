@@ -1,9 +1,9 @@
 {
-  "name": "@hashlock/resolver",
+  "name": "@pactum/resolver",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Off-chain resolver and CLI for HashLock cross-chain atomic swaps",
+  "description": "Off-chain resolver and CLI for Pactum cross-chain atomic swaps",
   "scripts": {
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
