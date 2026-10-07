@@ -143,10 +143,8 @@ impl<B: Bid> IntentFiller<B> {
         }
         let index = index?;
 
-        if let Some(budget) = self.budget {
-            if self.spent() + amount > budget {
-                return Ok(());
-            }
+        if self.budget.is_some_and(|budget| self.spent() + amount > budget) {
+            return Ok(());
         }
         let Some(bid) = self.bid.bid(order, amount) else { return Ok(()) };
         // small buffer for the block that lands the fill
