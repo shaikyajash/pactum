@@ -150,6 +150,19 @@ impl Maker {
     }
 }
 
+impl Maker {
+    /// True once the order is fully filled and every fill's secret is released.
+    /// Split orders may skip buckets, so this is not "all secrets released".
+    pub async fn is_complete(&self, intent: &OpenIntent) -> anyhow::Result<bool> {
+        let (filled, _) = self.src.progress(intent.hash).await?;
+        if filled != intent.order.srcAmount {
+            return Ok(false);
+        }
+        let fills = intent_fills(self, intent).await?;
+        Ok(fills.iter().all(|f| intent.released.contains(&f.secret_index)))
+    }
+}
+
 async fn intent_fills(m: &Maker, intent: &OpenIntent) -> anyhow::Result<Vec<crate::chain::Filled>> {
     m.src.fills_of(intent.hash, intent.src_from, m.src.head().await?).await
 }

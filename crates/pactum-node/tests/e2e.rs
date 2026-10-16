@@ -192,6 +192,7 @@ async fn gasless_split_intent_across_two_chains() {
     assert_eq!(filler_a.jobs[0].index, 2, "60% lands in bucket 2");
     assert_eq!(filler_b.jobs[0].index, 4, "final fill uses the last secret");
     assert!(filler_a.jobs.iter().chain(&filler_b.jobs).all(|j| j.status == JobStatus::Settled));
+    assert!(maker.is_complete(&intent).await.unwrap());
 
     // maker was paid on B at auction prices between floor and ceiling
     let gained = pb.get_balance(maker_addr).await.unwrap() - eth_before;
