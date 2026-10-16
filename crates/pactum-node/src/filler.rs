@@ -23,7 +23,7 @@ pub trait Bid: Send + Sync {
     }
 }
 
-/// Fixed exchange rate with an optional per-fill slice and inventory cap.
+/// Fixed exchange rate with a per-fill slice limit.
 #[derive(Clone, Debug)]
 pub struct FixedRate {
     /// destination units paid per `rate_den` source units
@@ -74,8 +74,8 @@ pub struct IntentFiller<B> {
     relay: RelayClient,
     bid: B,
     policy: TimelockPolicy,
-    /// Source units we may have outstanding across all jobs.
-    capacity: Option<U256>,
+    /// Total source units this filler will buy; refunded fills give budget back.
+    budget: Option<U256>,
     pub jobs: Vec<Job>,
 }
 
@@ -86,13 +86,13 @@ impl<B: Bid> IntentFiller<B> {
             relay,
             bid,
             policy: TimelockPolicy::default(),
-            capacity: None,
+            budget: None,
             jobs: Vec::new(),
         }
     }
 
-    pub fn with_capacity(mut self, capacity: U256) -> Self {
-        self.capacity = Some(capacity);
+    pub fn with_budget(mut self, budget: U256) -> Self {
+        self.budget = Some(budget);
         self
     }
 
@@ -110,8 +110,8 @@ impl<B: Bid> IntentFiller<B> {
         self.settle().await
     }
 
-    fn committed(&self) -> U256 {
-        self.jobs.iter().filter(|j| j.status == JobStatus::Locked).map(|j| j.amount).sum()
+    fn spent(&self) -> U256 {
+        self.jobs.iter().filter(|j| j.status != JobStatus::Refunded).map(|j| j.amount).sum()
     }
 
     async fn try_fill(&mut self, o: &OpenOrder) -> anyhow::Result<()> {
@@ -143,8 +143,8 @@ impl<B: Bid> IntentFiller<B> {
         }
         let index = index?;
 
-        if let Some(cap) = self.capacity {
-            if self.committed() + amount > cap {
+        if let Some(budget) = self.budget {
+            if self.spent() + amount > budget {
                 return Ok(());
             }
         }
@@ -171,7 +171,14 @@ impl<B: Bid> IntentFiller<B> {
 
         dst.ensure_allowance(order.dstToken, fill.owed).await?;
         let dst_swap = dst
-            .initiate(order.receiver, order.dstToken, fill.owed, secret_hash, dst_expiry, fill.swap_id)
+            .initiate(
+                order.receiver,
+                order.dstToken,
+                fill.owed,
+                secret_hash,
+                dst_expiry,
+                fill.swap_id,
+            )
             .await?;
 
         info!(order = %o.hash, %amount, index, owed = %fill.owed, "filled");
