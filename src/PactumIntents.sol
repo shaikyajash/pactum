@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {HashLock} from "./HashLock.sol";
 import {MerkleSecrets} from "./lib/MerkleSecrets.sol";
 import {SafeTransfer} from "./lib/SafeTransfer.sol";
+import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 
 /// @title PactumIntents
 /// @notice Gasless, partially fillable cross-chain swap intents settled by HTLCs.
@@ -91,6 +92,16 @@ contract PactumIntents is HashLock {
     error InvalidProof();
     error NotMaker();
     error PartialFillNotAllowed();
+    error PermitFailed();
+
+    /// @dev EIP-2612 approval signed by the maker for `srcToken`.
+    struct Permit {
+        uint256 value;
+        uint256 deadline;
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+    }
 
     // ------------------------------------------------------------------ fill
 
@@ -104,11 +115,29 @@ contract PactumIntents is HashLock {
         uint256 secretIndex,
         bytes32 secretHash,
         bytes32[] calldata proof
-    ) external returns (bytes32 swapId) {
+    ) public returns (bytes32 swapId) {
         bytes32 orderHash = hashOrder(order);
         _consume(order, orderHash, signature, fillAmount, secretIndex, secretHash, proof);
         swapId = _open(order, orderHash, fillAmount, secretIndex, secretHash);
         order.srcToken.safeTransferFrom(order.maker, address(this), fillAmount);
+    }
+
+    /// @notice `fill`, first applying the maker's EIP-2612 permit for `srcToken`.
+    /// @dev Removes the maker's last on-chain step: with a permit-capable token
+    ///      the maker never sends a transaction at all. If the permit was already
+    ///      used (e.g. front-run by someone submitting it directly) the fill still
+    ///      proceeds as long as the allowance is in place.
+    function fillWithPermit(
+        Order calldata order,
+        bytes calldata signature,
+        uint256 fillAmount,
+        uint256 secretIndex,
+        bytes32 secretHash,
+        bytes32[] calldata proof,
+        Permit calldata permit
+    ) external returns (bytes32 swapId) {
+        _applyPermit(order.srcToken, order.maker, permit, fillAmount);
+        swapId = fill(order, signature, fillAmount, secretIndex, secretHash, proof);
     }
 
     /// @notice Maker cancels the unfilled remainder of an order.
@@ -221,6 +250,19 @@ contract PactumIntents is HashLock {
             secretIndex,
             owedDstAmount(order, fillAmount, block.timestamp)
         );
+    }
+
+    /// @dev A failed permit is fine if the allowance already covers this fill: the
+    ///      permit may have been front-run, or consumed by an earlier partial fill.
+    function _applyPermit(address token, address owner, Permit calldata p, uint256 needed)
+        internal
+    {
+        try IERC20Permit(token).permit(owner, address(this), p.value, p.deadline, p.v, p.r, p.s) {}
+        catch {
+            if (IERC20Permit(token).allowance(owner, address(this)) < p.value) {
+                revert PermitFailed();
+            }
+        }
     }
 
     function _validate(Order calldata o) internal pure {
