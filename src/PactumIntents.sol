@@ -75,7 +75,6 @@ contract PactumIntents is HashLock {
     );
 
     uint16 public constant MAX_PARTS = 1024;
-    bytes4 private constant _ERC1271_MAGIC = 0x1626ba7e;
 
     struct Fill {
         uint256 filled;
@@ -119,6 +118,10 @@ contract PactumIntents is HashLock {
     // ------------------------------------------------------------------ fill
 
     /// @notice Fill `fillAmount` of a signed order.
+    /// @dev The maker's signature (ECDSA or EIP-1271) is checked only on the first
+    ///      fill of an order; later partial fills rely on the recorded fill. A smart
+    ///      wallet that later revokes its EIP-1271 approval does not stop them: to
+    ///      withdraw an order the maker must call `cancel`.
     /// @param secretIndex index of the maker secret this fill locks behind
     /// @param secretHash  sha256 of that secret, proven against `order.secretsRoot`
     function fill(
@@ -222,7 +225,9 @@ contract PactumIntents is HashLock {
         if (block.timestamp > order.deadline) revert OrderExpired();
         _validate(order);
         // a recorded fill proves the signature was already checked for this hash
-        if (f.filled == 0) _checkSignature(order.maker, orderHash, signature);
+        if (f.filled == 0 && !_isValidSignature(order.maker, orderHash, signature)) {
+            revert InvalidSignature();
+        }
 
         uint256 filledAfter = f.filled + fillAmount;
         if (fillAmount == 0 || filledAfter > order.srcAmount) revert Overfill();
@@ -290,18 +295,5 @@ contract PactumIntents is HashLock {
         ) {
             revert BadOrder();
         }
-    }
-
-    function _checkSignature(address maker, bytes32 digest, bytes calldata sig) internal view {
-        if (maker.code.length > 0) {
-            // EIP-1271 smart-contract wallets (Safe, 4337 accounts, ...)
-            (bool ok, bytes memory ret) =
-                maker.staticcall(abi.encodeWithSelector(_ERC1271_MAGIC, digest, sig));
-            if (!ok || ret.length < 32 || abi.decode(ret, (bytes4)) != _ERC1271_MAGIC) {
-                revert InvalidSignature();
-            }
-            return;
-        }
-        if (_recover(digest, sig) != maker) revert InvalidSignature();
     }
 }

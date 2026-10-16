@@ -3,6 +3,8 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {HashLock} from "../src/HashLock.sol";
+import {MockWallet} from "./mocks/MockWallet.sol";
+import {Mock7702Delegate} from "./mocks/Mock7702Delegate.sol";
 
 contract InstantRefundTest is Test {
     HashLock internal htlc;
@@ -69,6 +71,45 @@ contract InstantRefundTest is Test {
     function test_instantRefund_rejectsBadLength() public {
         vm.expectRevert(HashLock.InvalidSignature.selector);
         htlc.instantRefund(id, hex"1234");
+    }
+
+    function _lockFor(address redeemer) internal returns (bytes32) {
+        vm.prank(alice);
+        return htlc.initiate{value: 1 ether}(
+            redeemer, address(0), 1 ether, secretHash, uint64(block.timestamp + 1 days), "w"
+        );
+    }
+
+    /// audit-1 L-3: a smart-wallet redeemer consents via EIP-1271.
+    function test_instantRefund_contractRedeemerViaEip1271() public {
+        MockWallet wallet = new MockWallet(bob);
+        bytes32 wid = _lockFor(address(wallet));
+        htlc.instantRefund(wid, _sign(bobKey, htlc.refundDigest(wid)));
+        assertEq(alice.balance, 9 ether);
+        (,, bool settled,,,,) = htlc.swaps(wid);
+        assertTrue(settled);
+    }
+
+    function test_instantRefund_contractRedeemerRejectsWrongSigner() public {
+        MockWallet wallet = new MockWallet(bob);
+        bytes32 wid = _lockFor(address(wallet));
+        bytes memory sig = _sign(0xBAD, htlc.refundDigest(wid));
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        htlc.instantRefund(wid, sig);
+    }
+
+    /// audit-1 I-1: an EIP-7702-delegated EOA has code whose delegate may not
+    /// implement EIP-1271; its plain ECDSA signature must still be accepted.
+    function test_instantRefund_7702DelegatedRedeemerFallsBackToEcdsa() public {
+        vm.etch(bob, address(new Mock7702Delegate()).code);
+        assertGt(bob.code.length, 0);
+
+        bytes memory forged = _sign(0xBAD, htlc.refundDigest(id));
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        htlc.instantRefund(id, forged);
+
+        htlc.instantRefund(id, _sign(bobKey, htlc.refundDigest(id)));
+        assertEq(alice.balance, 10 ether);
     }
 
     function test_domainSeparator_chainBound() public {

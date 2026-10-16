@@ -7,6 +7,7 @@ import {PactumIntents} from "../src/PactumIntents.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockWallet} from "./mocks/MockWallet.sol";
 import {MockFeeERC20} from "./mocks/MockFeeERC20.sol";
+import {Mock7702Delegate} from "./mocks/Mock7702Delegate.sol";
 import {TreeBuilder} from "./MerkleSecrets.t.sol";
 
 contract PactumIntentsTest is Test {
@@ -160,6 +161,37 @@ contract PactumIntentsTest is Test {
         vm.prank(resolverA);
         intents.fill(o, _sign(o, makerKey), SRC, 0, hashes[0], proof);
         assertEq(usdc.balanceOf(address(wallet)), 0);
+    }
+
+    function test_smartWalletMakerRejectsForeignSignature() public {
+        MockWallet wallet = new MockWallet(maker);
+        usdc.mint(address(wallet), SRC);
+        wallet.approve(address(usdc), address(intents));
+
+        PactumIntents.Order memory o = _order(1);
+        o.maker = address(wallet);
+        bytes memory sig = _sign(o, 0xBAD);
+        bytes32[] memory proof = new bytes32[](0);
+        vm.prank(resolverA);
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        intents.fill(o, sig, SRC, 0, hashes[0], proof);
+    }
+
+    /// audit-1 I-1: a maker that delegated its EOA via EIP-7702 to code without
+    /// EIP-1271 can still sign orders with its key.
+    function test_7702DelegatedMakerSignsWithEcdsa() public {
+        vm.etch(maker, address(new Mock7702Delegate()).code);
+        PactumIntents.Order memory o = _order(1);
+        bytes32[] memory proof = new bytes32[](0);
+
+        bytes memory forged = _sign(o, 0xBAD);
+        vm.prank(resolverA);
+        vm.expectRevert(HashLock.InvalidSignature.selector);
+        intents.fill(o, forged, SRC, 0, hashes[0], proof);
+
+        vm.prank(resolverA);
+        intents.fill(o, _sign(o, makerKey), SRC, 0, hashes[0], proof);
+        assertEq(usdc.balanceOf(address(intents)), SRC);
     }
 
     // ------------------------------------------------------------ auction

@@ -19,6 +19,7 @@ contract HashLock {
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
     bytes32 public constant REFUND_TYPEHASH = keccak256("Refund(bytes32 swapId)");
+    bytes4 internal constant _ERC1271_MAGIC = 0x1626ba7e;
 
     /// @notice Share of a deposit paid to whoever calls `refund` on an expired swap,
     ///         in basis points. The rest goes to the swap's initiator.
@@ -161,11 +162,13 @@ contract HashLock {
 
     /// @notice Refund before expiry with the redeemer's consent.
     /// @dev Lets both parties unwind quickly when the counter-leg is never funded,
-    ///      instead of waiting out the full timelock.
+    ///      instead of waiting out the full timelock. Contract redeemers sign via
+    ///      EIP-1271 (see `_isValidSignature`).
     function instantRefund(bytes32 swapId, bytes calldata signature) external {
         Swap storage s = _live(swapId);
-        bytes32 digest = refundDigest(swapId);
-        if (_recover(digest, signature) != s.redeemer) revert InvalidSignature();
+        if (!_isValidSignature(s.redeemer, refundDigest(swapId), signature)) {
+            revert InvalidSignature();
+        }
 
         s.settled = true;
         emit Refunded(swapId);
@@ -232,17 +235,40 @@ contract HashLock {
         if (s.settled) revert AlreadySettled();
     }
 
-    function _recover(bytes32 digest, bytes calldata sig) internal pure returns (address signer) {
-        if (sig.length != 65) revert InvalidSignature();
+    /// @dev True if `sig` is `signer`'s signature over `digest`.
+    ///
+    ///      If `signer` has code it is asked via EIP-1271 first (Safe, 4337 accounts,
+    ///      ...). If that call fails or returns anything but the magic value, ECDSA
+    ///      is tried as well: an EIP-7702-delegated EOA has code but still owns its
+    ///      key, and its delegate may not implement EIP-1271. This fallback is safe
+    ///      for ordinary contracts because no private key maps to their address, so
+    ///      `ecrecover` can never return it.
+    function _isValidSignature(address signer, bytes32 digest, bytes calldata sig)
+        internal
+        view
+        returns (bool)
+    {
+        if (signer == address(0)) return false;
+        if (signer.code.length > 0) {
+            (bool ok, bytes memory ret) =
+                signer.staticcall(abi.encodeWithSelector(_ERC1271_MAGIC, digest, sig));
+            // compare the whole word so malformed returns cannot revert the decoder
+            if (ok && ret.length >= 32 && bytes32(ret) == bytes32(_ERC1271_MAGIC)) return true;
+        }
+        return _recover(digest, sig) == signer;
+    }
+
+    /// @dev ECDSA signer of `digest`, or address(0) for malformed or malleable
+    ///      (EIP-2 high-s) signatures.
+    function _recover(bytes32 digest, bytes calldata sig) internal pure returns (address) {
+        if (sig.length != 65) return address(0);
         bytes32 r = bytes32(sig[0:32]);
         bytes32 s = bytes32(sig[32:64]);
         uint8 v = uint8(sig[64]);
-        // reject malleable high-s signatures (EIP-2)
         if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
-            revert InvalidSignature();
+            return address(0);
         }
-        signer = ecrecover(digest, v, r, s);
-        if (signer == address(0)) revert InvalidSignature();
+        return ecrecover(digest, v, r, s);
     }
 
     /// @dev Moves the swap's deposit, if any, into the pull ledger: `tipBps` of it to
