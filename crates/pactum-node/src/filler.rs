@@ -158,7 +158,15 @@ impl<B: Bid> IntentFiller<B> {
         let secret_hash = *hashes.get(index).ok_or_else(|| anyhow::anyhow!("no hash {index}"))?;
 
         let fill = src
-            .fill(order, o.signed.signature.clone(), amount, index, secret_hash, tree.proof(index))
+            .fill(
+                order,
+                o.signed.signature.clone(),
+                amount,
+                index,
+                secret_hash,
+                tree.proof(index),
+                o.signed.permit.as_ref(),
+            )
             .await?;
         let src_expiry = src.escrow(fill.swap_id).await?.expiry;
         let Some(dst_expiry) = self.policy.follower_expiry(src_expiry, dst.now().await?) else {

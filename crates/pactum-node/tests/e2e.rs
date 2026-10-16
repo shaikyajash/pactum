@@ -165,6 +165,7 @@ async fn gasless_split_intent_across_two_chains() {
                 parts: 4,
                 receiver: None,
                 min_deposit: parse_ether("0.01").unwrap(),
+                permit_version: None,
             },
             U256::from(1),
         )

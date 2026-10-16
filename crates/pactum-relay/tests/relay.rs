@@ -30,6 +30,7 @@ fn signed(signer: &PrivateKeySigner, maker: Address, secrets: &OrderSecrets) -> 
         src_chain_id: 1,
         contract,
         secret_hashes: secrets.hashes(),
+        permit: None,
     }
 }
 

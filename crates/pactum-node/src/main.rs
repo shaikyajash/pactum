@@ -90,6 +90,10 @@ enum Cmd {
         /// Native deposit (wei) each fill must post as a keeper incentive.
         #[arg(long, default_value_t = U256::ZERO)]
         min_deposit: U256,
+        /// Sign an EIP-2612 permit (with this domain version, e.g. "1", or "2" for
+        /// USDC) instead of requiring a prior approve.
+        #[arg(long)]
+        permit_version: Option<String>,
     },
 }
 
@@ -157,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
             parts,
             receiver,
             min_deposit,
+            permit_version,
         } => {
             let cfg = Config::load(&config)?;
             let src = Chain::connect(cfg.chain(&from)?, key.clone())?;
@@ -181,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
                         parts,
                         receiver,
                         min_deposit,
+                        permit_version,
                     },
                     nonce,
                 )

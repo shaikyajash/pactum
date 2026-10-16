@@ -5,7 +5,11 @@ use alloy::{
     signers::{SignerSync, local::PrivateKeySigner},
 };
 use anyhow::ensure;
-use pactum_core::{Order, OrderSecrets, timelock::TimelockPolicy};
+use pactum_core::{
+    Order, OrderSecrets,
+    permit::{Permit, SignedPermit, TokenDomain},
+    timelock::TimelockPolicy,
+};
 use pactum_relay::{RelayClient, SecretRelease, SignedOrder};
 use tracing::info;
 
@@ -29,6 +33,9 @@ pub struct IntentRequest {
     /// Native deposit each fill must post; paid to whoever settles the escrow,
     /// so keepers are paid to refund us if a resolver walks away.
     pub min_deposit: U256,
+    /// Sign an EIP-2612 permit with this domain version instead of relying on a
+    /// prior `approve`. `None` means the allowance is already in place.
+    pub permit_version: Option<String>,
 }
 
 pub struct OpenIntent {
@@ -91,12 +98,17 @@ impl Maker {
         };
         let digest = order.digest(self.src.id, self.src.contract);
         let signature = self.signer.sign_hash_sync(&digest)?;
+        let permit = match &req.permit_version {
+            Some(version) => Some(self.sign_permit(&order, version).await?),
+            None => None,
+        };
         let signed = SignedOrder {
             order: order.clone(),
             signature: signature.as_bytes().into(),
             src_chain_id: self.src.id,
             contract: self.src.contract,
             secret_hashes: secrets.hashes(),
+            permit,
         };
         let hash = self.relay.post(&signed).await?;
         ensure!(hash == digest, "relay returned a different order hash");
@@ -109,6 +121,32 @@ impl Maker {
             released: HashSet::new(),
             src_from: self.src.head().await?,
             dst_from: self.dst.head().await?,
+        })
+    }
+
+    /// Permit the intents contract to pull the whole order, valid until the deadline.
+    async fn sign_permit(&self, order: &Order, version: &str) -> anyhow::Result<SignedPermit> {
+        let (name, nonce) = self.src.permit_info(order.srcToken, order.maker).await?;
+        let permit = Permit {
+            owner: order.maker,
+            spender: self.src.contract,
+            value: order.srcAmount,
+            nonce,
+            deadline: U256::from(order.deadline),
+        };
+        let domain = TokenDomain {
+            name,
+            version: version.to_owned(),
+            chain_id: self.src.id,
+            token: order.srcToken,
+        };
+        let sig = self.signer.sign_hash_sync(&permit.digest(&domain))?;
+        Ok(SignedPermit {
+            value: permit.value,
+            deadline: permit.deadline,
+            v: 27 + sig.v() as u8,
+            r: sig.r().into(),
+            s: sig.s().into(),
         })
     }
 

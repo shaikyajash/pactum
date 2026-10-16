@@ -26,6 +26,14 @@ sol! {
             uint256 minDeposit;
         }
 
+        struct Permit {
+            uint256 value;
+            uint256 deadline;
+            uint8 v;
+            bytes32 r;
+            bytes32 s;
+        }
+
         event Initiated(
             bytes32 indexed swapId,
             address indexed initiator,
@@ -82,6 +90,15 @@ sol! {
             bytes32 secretHash,
             bytes32[] calldata proof
         ) external payable returns (bytes32 swapId);
+        function fillWithPermit(
+            Order calldata order,
+            bytes calldata signature,
+            uint256 fillAmount,
+            uint256 secretIndex,
+            bytes32 secretHash,
+            bytes32[] calldata proof,
+            Permit calldata permit
+        ) external payable returns (bytes32 swapId);
     }
 
     #[sol(rpc)]
@@ -90,6 +107,16 @@ sol! {
         function allowance(address owner, address spender) external view returns (uint256);
         function balanceOf(address owner) external view returns (uint256);
     }
+
+    #[sol(rpc)]
+    interface IERC20Permit {
+        function name() external view returns (string);
+        function nonces(address owner) external view returns (uint256);
+    }
+}
+
+pub fn permit_binding(p: &pactum_core::permit::SignedPermit) -> PactumIntents::Permit {
+    PactumIntents::Permit { value: p.value, deadline: p.deadline, v: p.v, r: p.r, s: p.s }
 }
 
 /// The core and binding `Order` types are generated separately but share an ABI.

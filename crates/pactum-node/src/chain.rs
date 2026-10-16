@@ -10,7 +10,8 @@ use anyhow::{Context, bail};
 use pactum_core::Order;
 use serde::Deserialize;
 
-use crate::contracts::{IERC20, PactumIntents, to_binding};
+use crate::contracts::{IERC20, IERC20Permit, PactumIntents, permit_binding, to_binding};
+use pactum_core::permit::SignedPermit;
 
 /// Native asset sentinel, as in `HashLock.NATIVE`.
 pub const NATIVE: Address = Address::ZERO;
@@ -166,6 +167,16 @@ impl Chain {
         self.confirm("refund", r).await.map(drop)
     }
 
+    /// `name()` and the owner's EIP-2612 nonce, for signing a permit.
+    pub async fn permit_info(
+        &self,
+        token: Address,
+        owner: Address,
+    ) -> anyhow::Result<(String, U256)> {
+        let t = IERC20Permit::new(token, self.provider.clone());
+        Ok((t.name().call().await?, t.nonces(owner).call().await?))
+    }
+
     pub async fn ensure_allowance(&self, token: Address, amount: U256) -> anyhow::Result<()> {
         if token == NATIVE {
             return Ok(());
@@ -178,6 +189,8 @@ impl Chain {
         self.confirm("approve", r).await.map(drop)
     }
 
+    /// Fill a signed order, applying the maker's permit first when one is given.
+    #[allow(clippy::too_many_arguments)]
     pub async fn fill(
         &self,
         order: &Order,
@@ -186,15 +199,24 @@ impl Chain {
         index: usize,
         secret_hash: B256,
         proof: Vec<B256>,
+        permit: Option<&SignedPermit>,
     ) -> anyhow::Result<Filled> {
-        let receipt = self
-            .htlc()
-            .fill(to_binding(order), signature, amount, U256::from(index), secret_hash, proof)
-            .value(order.minDeposit)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let (htlc, o, i) = (self.htlc(), to_binding(order), U256::from(index));
+        let pending = match permit {
+            Some(p) => {
+                htlc.fillWithPermit(o, signature, amount, i, secret_hash, proof, permit_binding(p))
+                    .value(order.minDeposit)
+                    .send()
+                    .await?
+            }
+            None => {
+                htlc.fill(o, signature, amount, i, secret_hash, proof)
+                    .value(order.minDeposit)
+                    .send()
+                    .await?
+            }
+        };
+        let receipt = pending.get_receipt().await?;
         let receipt = self.confirm("fill", receipt).await?;
         receipt
             .inner
