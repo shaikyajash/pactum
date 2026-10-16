@@ -3,11 +3,6 @@ out/
 cache/
 broadcast/*/31337/
 
-# node
-node_modules/
-dist/
-*.tsbuildinfo
-
 # env
 .env
 .env.*
