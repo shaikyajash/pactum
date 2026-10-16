@@ -66,16 +66,31 @@ contract HashLock {
         uint64 expiry,
         bytes32 salt
     ) external payable returns (bytes32 swapId) {
+        if (msg.value != (token == NATIVE ? amount : 0)) revert InvalidValue();
+        swapId = _create(msg.sender, redeemer, token, amount, secretHash, expiry, salt);
+        if (token != NATIVE) token.safeTransferFrom(msg.sender, address(this), amount);
+    }
+
+    /// @dev Records a swap without moving funds. Callers must ensure the contract
+    ///      receives `amount` of `token` in the same transaction.
+    function _create(
+        address initiator,
+        address redeemer,
+        address token,
+        uint256 amount,
+        bytes32 secretHash,
+        uint64 expiry,
+        bytes32 salt
+    ) internal returns (bytes32 swapId) {
         if (redeemer == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         if (expiry <= block.timestamp) revert InvalidExpiry();
-        if (msg.value != (token == NATIVE ? amount : 0)) revert InvalidValue();
 
-        swapId = computeSwapId(msg.sender, redeemer, token, amount, secretHash, expiry, salt);
+        swapId = computeSwapId(initiator, redeemer, token, amount, secretHash, expiry, salt);
         if (swaps[swapId].initiator != address(0)) revert SwapExists();
 
         swaps[swapId] = Swap({
-            initiator: msg.sender,
+            initiator: initiator,
             expiry: expiry,
             settled: false,
             redeemer: redeemer,
@@ -84,9 +99,7 @@ contract HashLock {
             secretHash: secretHash
         });
 
-        emit Initiated(swapId, msg.sender, redeemer, token, amount, secretHash, expiry);
-
-        if (token != NATIVE) token.safeTransferFrom(msg.sender, address(this), amount);
+        emit Initiated(swapId, initiator, redeemer, token, amount, secretHash, expiry);
     }
 
     /// @notice Release funds to the redeemer by revealing the secret.
