@@ -7,6 +7,7 @@
 pub mod auction;
 pub mod merkle;
 pub mod order;
+pub mod permit;
 pub mod secret;
 pub mod swap;
 pub mod timelock;
