@@ -9,7 +9,7 @@ use pactum_core::{
 use pactum_relay::{OpenOrder, RelayClient};
 use tracing::{debug, info, warn};
 
-use crate::Chain;
+use crate::{Chain, store::JsonStore};
 
 /// A resolver's pricing strategy.
 pub trait Bid: Send + Sync {
@@ -43,14 +43,14 @@ impl Bid for FixedRate {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JobStatus {
     Locked,
     Settled,
     Refunded,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Job {
     pub order_hash: B256,
     pub index: usize,
@@ -76,6 +76,7 @@ pub struct IntentFiller<B> {
     policy: TimelockPolicy,
     /// Total source units this filler will buy; refunded fills give budget back.
     budget: Option<U256>,
+    store: Option<JsonStore<Vec<Job>>>,
     pub jobs: Vec<Job>,
 }
 
@@ -87,6 +88,7 @@ impl<B: Bid> IntentFiller<B> {
             bid,
             policy: TimelockPolicy::default(),
             budget: None,
+            store: None,
             jobs: Vec::new(),
         }
     }
@@ -99,6 +101,25 @@ impl<B: Bid> IntentFiller<B> {
     pub fn with_policy(mut self, policy: TimelockPolicy) -> Self {
         self.policy = policy;
         self
+    }
+
+    /// Persist jobs to `path`, resuming any saved there by a previous run so
+    /// open escrows are still settled or refunded after a restart.
+    pub fn with_store(mut self, path: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let store = JsonStore::<Vec<Job>>::new(path);
+        if let Some(jobs) = store.load()? {
+            info!(count = jobs.len(), "resumed jobs");
+            self.jobs = jobs;
+        }
+        self.store = Some(store);
+        Ok(self)
+    }
+
+    fn persist(&self) -> anyhow::Result<()> {
+        match &self.store {
+            Some(s) => s.save(&self.jobs),
+            None => Ok(()),
+        }
     }
 
     pub async fn tick(&mut self) -> anyhow::Result<()> {
@@ -199,10 +220,19 @@ impl<B: Bid> IntentFiller<B> {
             dst_expiry,
             status: JobStatus::Locked,
         });
-        Ok(())
+        self.persist()
     }
 
     async fn settle(&mut self) -> anyhow::Result<()> {
+        let before: Vec<JobStatus> = self.jobs.iter().map(|j| j.status).collect();
+        let result = self.settle_jobs().await;
+        if self.jobs.iter().map(|j| j.status).ne(before) {
+            self.persist()?;
+        }
+        result
+    }
+
+    async fn settle_jobs(&mut self) -> anyhow::Result<()> {
         for job in self.jobs.iter_mut().filter(|j| j.status == JobStatus::Locked) {
             let src = &self.chains[&job.src_chain];
             let dst = &self.chains[&job.dst_chain];
