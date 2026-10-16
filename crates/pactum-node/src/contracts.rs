@@ -48,9 +48,12 @@ sol! {
         );
         event Redeemed(bytes32 indexed swapId, bytes32 indexed secretHash, bytes secret);
         event Refunded(bytes32 indexed swapId);
-        event DepositClaimed(bytes32 indexed swapId, address indexed to, uint256 amount);
+        event DepositCredited(bytes32 indexed swapId, address indexed to, uint256 amount);
 
         function deposits(bytes32 swapId) external view returns (uint256);
+        function depositCredit(address account) external view returns (uint256);
+        function KEEPER_TIP_BPS() external view returns (uint256);
+        function withdrawDeposits() external;
         event OrderFilled(
             bytes32 indexed orderHash,
             bytes32 indexed swapId,

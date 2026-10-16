@@ -6,11 +6,12 @@ use tracing::{info, warn};
 use crate::Chain;
 
 /// Watches for expired, unsettled escrows that carry a safety deposit and
-/// refunds them. The deposit is the keeper's reward; the initiator (usually a
-/// maker whose resolver walked away) gets their funds back without paying gas.
+/// refunds them. The keeper earns `KEEPER_TIP_BPS` of the deposit; the rest is
+/// credited to the initiator (usually a maker whose resolver walked away), who
+/// also gets their funds back without paying gas.
 pub struct Keeper {
     chains: Vec<Chain>,
-    /// Smallest deposit worth spending a refund transaction on.
+    /// Smallest tip worth spending a refund transaction on.
     min_reward: U256,
     cursors: HashMap<u64, u64>,
     /// chain id -> swap id -> expiry, for escrows we have not seen settle
@@ -53,6 +54,7 @@ impl Keeper {
             }
 
             let now = chain.now().await?;
+            let tip_bps = chain.keeper_tip_bps().await?;
             let Some(watch) = self.watching.get_mut(&chain.id) else { continue };
             let due: Vec<B256> =
                 watch.iter().filter(|(_, exp)| now >= **exp).map(|(id, _)| *id).collect();
@@ -62,7 +64,7 @@ impl Keeper {
                     watch.remove(&id);
                     continue;
                 }
-                let reward = chain.deposit(id).await?;
+                let reward = chain.deposit(id).await? * tip_bps / U256::from(10_000);
                 if reward < self.min_reward || reward.is_zero() {
                     watch.remove(&id);
                     continue;
@@ -76,6 +78,11 @@ impl Keeper {
                     // someone else may have beaten us to it; retry next tick
                     Err(e) => warn!(swap = %id, "refund failed: {e:#}"),
                 }
+            }
+
+            let earned = chain.withdraw_deposits().await?;
+            if !earned.is_zero() {
+                info!(chain = chain.name, amount = %earned, "withdrew keeper tips");
             }
         }
         Ok(())

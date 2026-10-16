@@ -113,6 +113,27 @@ impl Chain {
         Ok(self.htlc().deposits(swap_id).call().await?)
     }
 
+    /// Deposits credited to `account` and not yet withdrawn.
+    pub async fn deposit_credit(&self, account: Address) -> anyhow::Result<U256> {
+        Ok(self.htlc().depositCredit(account).call().await?)
+    }
+
+    /// Share of a deposit paid to whoever refunds an expired escrow, in bps.
+    pub async fn keeper_tip_bps(&self) -> anyhow::Result<U256> {
+        Ok(self.htlc().KEEPER_TIP_BPS().call().await?)
+    }
+
+    /// Withdraw our credited deposits if there are any; returns the amount.
+    pub async fn withdraw_deposits(&self) -> anyhow::Result<U256> {
+        let credit = self.deposit_credit(self.account).await?;
+        if credit.is_zero() {
+            return Ok(credit);
+        }
+        let r = self.htlc().withdrawDeposits().send().await?.get_receipt().await?;
+        self.confirm("withdrawDeposits", r).await?;
+        Ok(credit)
+    }
+
     pub async fn progress(&self, order_hash: B256) -> anyhow::Result<(U256, usize)> {
         let f = self.htlc().fills(order_hash).call().await?;
         Ok((f.filled, f.nextIndex as usize))

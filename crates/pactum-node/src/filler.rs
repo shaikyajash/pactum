@@ -128,7 +128,19 @@ impl<B: Bid> IntentFiller<B> {
                 debug!(order = %o.hash, "not filled: {e:#}");
             }
         }
-        self.settle().await
+        self.settle().await?;
+        self.collect_deposits().await
+    }
+
+    /// Settling credits our deposits to HashLock's pull ledger; sweep them back.
+    async fn collect_deposits(&self) -> anyhow::Result<()> {
+        for chain in self.chains.values() {
+            let got = chain.withdraw_deposits().await?;
+            if !got.is_zero() {
+                info!(chain = chain.name, amount = %got, "withdrew deposits");
+            }
+        }
+        Ok(())
     }
 
     fn spent(&self) -> U256 {
