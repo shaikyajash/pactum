@@ -7,6 +7,7 @@ pub mod contracts;
 pub mod filler;
 pub mod keeper;
 pub mod maker;
+pub mod store;
 
 pub use chain::{Chain, ChainConfig, NATIVE};
 pub use filler::{Bid, IntentFiller, Job, JobStatus};
