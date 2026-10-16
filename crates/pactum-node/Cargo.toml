@@ -23,4 +23,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 alloy = { workspace = true, features = ["node-bindings"] }
