@@ -376,9 +376,10 @@ contract DepositsTest is Test {
         assertEq(address(relay).balance, 0);
     }
 
-    function test_relayRejectsStrayEth() public {
+    /// The relay never custodies ETH: it has no receive() and HashLock never pays it.
+    function test_relayCannotReceiveEth() public {
         (SecretRelay relay,) = _relayed(resolver);
-        vm.expectRevert(SecretRelay.OnlyHashLock.selector);
-        payable(address(relay)).transfer(1);
+        (bool ok,) = address(relay).call{value: 1}("");
+        assertFalse(ok);
     }
 }

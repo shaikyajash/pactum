@@ -32,8 +32,6 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
     address public owner;
     /// trusted SecretRelay deployment on each remote chain, by CCIP chain selector
     mapping(uint64 chainSelector => address peer) public peers;
-    /// deposits that could not be pushed to their redeemer; withdraw with `claim`
-    mapping(address => uint256) public unclaimed;
 
     event PeerSet(uint64 indexed chainSelector, address peer);
     event OwnershipTransferred(address indexed previous, address indexed next);
@@ -51,9 +49,6 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
     error EmptyBatch();
     error InsufficientFee(uint256 required, uint256 provided);
     error RefundFailed();
-    error OnlyHashLock();
-    error NothingToClaim();
-    error ClaimFailed();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -96,7 +91,7 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
     /// @notice Send secrets for swaps living on `dstChainSelector`. Permissionless:
     ///         the secrets are already public on this chain and are checked on arrival.
     /// @param gasLimit destination gas for `ccipReceive`; budget one `HashLock.redeem`
-    ///        (plus a deposit forward) per entry. Excess `msg.value` is refunded.
+    ///        per entry. Excess `msg.value` is refunded.
     function relay(
         uint64 dstChainSelector,
         bytes32[] calldata swapIds,
@@ -150,12 +145,10 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
             abi.decode(message.data, (bytes32[], bytes[]));
 
         for (uint256 i; i < swapIds.length; ++i) {
-            (,,, address redeemer,,,) = hashLock.swaps(swapIds[i]);
-            uint256 before = address(this).balance;
+            // HashLock credits any safety deposit straight to the swap's redeemer,
+            // so the relay never holds ETH on anyone's behalf
             try hashLock.redeem(swapIds[i], secrets[i]) {
                 emit SecretRelayed(swapIds[i], src);
-                // HashLock pays the settler's deposit to us; it belongs to the redeemer
-                _forward(redeemer, address(this).balance - before);
             } catch (bytes memory reason) {
                 emit RelayFailed(swapIds[i], src, reason);
             }
@@ -165,28 +158,5 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
     function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
         return interfaceId == type(IAny2EVMMessageReceiver).interfaceId
             || interfaceId == type(IERC165).interfaceId;
-    }
-
-    // --------------------------------------------------------------- deposits
-
-    /// @dev Only HashLock deposit payouts are accepted.
-    receive() external payable {
-        if (msg.sender != address(hashLock)) revert OnlyHashLock();
-    }
-
-    /// @notice Withdraw deposits that could not be pushed automatically.
-    function claim() external {
-        uint256 amount = unclaimed[msg.sender];
-        if (amount == 0) revert NothingToClaim();
-        unclaimed[msg.sender] = 0;
-        (bool ok,) = msg.sender.call{value: amount}("");
-        if (!ok) revert ClaimFailed();
-    }
-
-    function _forward(address to, uint256 amount) internal {
-        if (amount == 0) return;
-        // bounded gas so a hostile redeemer can't grief the rest of the batch
-        (bool ok,) = to.call{value: amount, gas: 10_000}("");
-        if (!ok) unclaimed[to] += amount;
     }
 }
