@@ -50,7 +50,8 @@ contract PactumIntentsPermitTest is Test {
             srcLock: 6 hours,
             parts: parts,
             secretsRoot: root,
-            nonce: 1
+            nonce: 1,
+            minDeposit: 0
         });
     }
 

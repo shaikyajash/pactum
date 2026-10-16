@@ -43,7 +43,8 @@ contract IntentsHandler is Test {
             srcLock: 1 days,
             parts: 8,
             secretsRoot: root,
-            nonce: 0
+            nonce: 0,
+            minDeposit: 0
         });
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerKey, intents.hashOrder(order));
         sig = abi.encodePacked(r, s, v);

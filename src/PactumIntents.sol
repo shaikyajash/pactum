@@ -53,13 +53,15 @@ contract PactumIntents is HashLock {
         uint16 parts;
         bytes32 secretsRoot;
         uint256 nonce;
+        /// native deposit each fill must post; see HashLock.deposits
+        uint256 minDeposit;
     }
 
     bytes32 public constant ORDER_TYPEHASH = keccak256(
         "Order(address maker,address receiver,address srcToken,uint256 srcAmount,"
         "uint256 dstChainId,address dstToken,uint256 startDstAmount,uint256 endDstAmount,"
         "uint64 auctionStart,uint64 auctionEnd,uint64 deadline,uint64 srcLock,uint16 parts,"
-        "bytes32 secretsRoot,uint256 nonce)"
+        "bytes32 secretsRoot,uint256 nonce,uint256 minDeposit)"
     );
 
     uint16 public constant MAX_PARTS = 1024;
@@ -93,6 +95,7 @@ contract PactumIntents is HashLock {
     error NotMaker();
     error PartialFillNotAllowed();
     error PermitFailed();
+    error DepositTooLow();
 
     /// @dev EIP-2612 approval signed by the maker for `srcToken`.
     struct Permit {
@@ -115,7 +118,8 @@ contract PactumIntents is HashLock {
         uint256 secretIndex,
         bytes32 secretHash,
         bytes32[] calldata proof
-    ) public returns (bytes32 swapId) {
+    ) public payable returns (bytes32 swapId) {
+        if (msg.value < order.minDeposit) revert DepositTooLow();
         bytes32 orderHash = hashOrder(order);
         _consume(order, orderHash, signature, fillAmount, secretIndex, secretHash, proof);
         swapId = _open(order, orderHash, fillAmount, secretIndex, secretHash);
@@ -135,7 +139,7 @@ contract PactumIntents is HashLock {
         bytes32 secretHash,
         bytes32[] calldata proof,
         Permit calldata permit
-    ) external returns (bytes32 swapId) {
+    ) external payable returns (bytes32 swapId) {
         _applyPermit(order.srcToken, order.maker, permit, fillAmount);
         swapId = fill(order, signature, fillAmount, secretIndex, secretHash, proof);
     }
@@ -242,6 +246,8 @@ contract PactumIntents is HashLock {
             uint64(block.timestamp) + order.srcLock,
             keccak256(abi.encode(orderHash, secretIndex))
         );
+        // the whole msg.value is the deposit; refunded to whoever settles this escrow
+        deposits[swapId] = msg.value;
         emit OrderFilled(
             orderHash,
             swapId,
