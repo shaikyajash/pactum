@@ -1,6 +1,9 @@
 //! On-chain bindings. Hand-written to match the Solidity interfaces so the
 //! crate builds without a prior `forge build`.
 
+// generated call builders mirror the Solidity signatures, e.g. fillWithPermit
+#![allow(clippy::too_many_arguments)]
+
 use alloy::sol;
 use alloy::sol_types::SolValue;
 
