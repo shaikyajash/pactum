@@ -210,9 +210,52 @@ contract SecretRelayTest is Test {
         vm.expectRevert(SecretRelay.NotOwner.selector);
         relayA.setPeer(1, address(1));
 
+        vm.expectRevert(SecretRelay.NotOwner.selector);
+        relayA.transferOwnership(alice);
+    }
+
+    /// audit-2 I-2: ownership moves only when the nominee accepts, so a typo'd
+    /// address can never brick the peer allowlist.
+    function test_admin_twoStepOwnershipTransfer() public {
+        vm.expectEmit(address(relayA));
+        emit SecretRelay.OwnershipTransferStarted(owner, alice);
         vm.prank(owner);
         relayA.transferOwnership(alice);
+        assertEq(relayA.owner(), owner, "not transferred until accepted");
+        assertEq(relayA.pendingOwner(), alice);
+
+        vm.prank(keeper);
+        vm.expectRevert(SecretRelay.NotPendingOwner.selector);
+        relayA.acceptOwnership();
+
+        vm.expectEmit(address(relayA));
+        emit SecretRelay.OwnershipTransferred(owner, alice);
+        vm.prank(alice);
+        relayA.acceptOwnership();
         assertEq(relayA.owner(), alice);
+        assertEq(relayA.pendingOwner(), address(0));
+
+        vm.prank(owner);
+        vm.expectRevert(SecretRelay.NotOwner.selector);
+        relayA.setPeer(1, address(1));
+        vm.prank(alice);
+        relayA.setPeer(1, address(1));
+    }
+
+    function test_admin_pendingTransferCanBeCancelled() public {
+        vm.startPrank(owner);
+        relayA.transferOwnership(alice);
+        relayA.transferOwnership(address(0));
+        vm.stopPrank();
+        vm.prank(alice);
+        vm.expectRevert(SecretRelay.NotPendingOwner.selector);
+        relayA.acceptOwnership();
+        assertEq(relayA.owner(), owner);
+    }
+
+    function test_constructor_rejectsZeroOwner() public {
+        vm.expectRevert(SecretRelay.ZeroAddress.selector);
+        new SecretRelay(IRouterClient(address(routerA)), htlcA, address(0));
     }
 
     function test_supportsReceiverInterface() public view {

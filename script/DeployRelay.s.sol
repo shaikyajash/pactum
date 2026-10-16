@@ -25,6 +25,7 @@ contract DeployRelay is Script {
         HashLock htlc = HashLock(payable(vm.envAddress("HASHLOCK")));
         address owner = vm.envAddress("OWNER");
 
+        require(owner != address(0), "OWNER must be set");
         require(address(htlc).code.length > 0, "HASHLOCK not deployed on this chain");
         require(address(router).code.length > 0, "CCIP_ROUTER not deployed on this chain");
 

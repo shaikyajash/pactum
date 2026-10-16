@@ -55,10 +55,13 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
     uint256 public constant MIN_ENTRY_GAS = 150_000;
 
     address public owner;
+    /// nominated by `transferOwnership`; becomes owner on `acceptOwnership`
+    address public pendingOwner;
     /// trusted SecretRelay deployment on each remote chain, by CCIP chain selector
     mapping(uint64 chainSelector => address peer) public peers;
 
     event PeerSet(uint64 indexed chainSelector, address peer);
+    event OwnershipTransferStarted(address indexed previous, address indexed next);
     event OwnershipTransferred(address indexed previous, address indexed next);
     event SecretsSent(
         bytes32 indexed messageId, uint64 indexed dstChainSelector, bytes32[] swapIds
@@ -67,6 +70,8 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
     event RelayFailed(bytes32 indexed swapId, uint64 indexed srcChainSelector, bytes reason);
 
     error NotOwner();
+    error NotPendingOwner();
+    error ZeroAddress();
     error OnlyRouter();
     error NoPeer(uint64 chainSelector);
     error UntrustedPeer(uint64 chainSelector, address sender);
@@ -83,6 +88,7 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
     }
 
     constructor(IRouterClient _router, HashLock _hashLock, address _owner) {
+        if (_owner == address(0)) revert ZeroAddress();
         router = _router;
         hashLock = _hashLock;
         owner = _owner;
@@ -96,9 +102,18 @@ contract SecretRelay is IAny2EVMMessageReceiver, IERC165 {
         emit PeerSet(chainSelector, peer);
     }
 
+    /// @notice Nominate `next` as owner; it takes effect once `next` calls
+    ///         `acceptOwnership`. Nominating address(0) cancels a pending transfer.
     function transferOwnership(address next) external onlyOwner {
-        emit OwnershipTransferred(owner, next);
-        owner = next;
+        pendingOwner = next;
+        emit OwnershipTransferStarted(owner, next);
+    }
+
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 
     // ------------------------------------------------------------------- send
