@@ -23,6 +23,7 @@ sol! {
         uint16 parts;
         bytes32 secretsRoot;
         uint256 nonce;
+        uint256 minDeposit;
     }
 }
 
@@ -85,7 +86,7 @@ mod tests {
             "Order(address maker,address receiver,address srcToken,uint256 srcAmount,\
              uint256 dstChainId,address dstToken,uint256 startDstAmount,uint256 endDstAmount,\
              uint64 auctionStart,uint64 auctionEnd,uint64 deadline,uint64 srcLock,uint16 parts,\
-             bytes32 secretsRoot,uint256 nonce)",
+             bytes32 secretsRoot,uint256 nonce,uint256 minDeposit)",
         );
         assert_eq!(Order::default().eip712_type_hash(), expected);
     }

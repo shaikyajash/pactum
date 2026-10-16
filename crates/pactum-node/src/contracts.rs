@@ -23,6 +23,7 @@ sol! {
             uint16 parts;
             bytes32 secretsRoot;
             uint256 nonce;
+            uint256 minDeposit;
         }
 
         event Initiated(
@@ -36,6 +37,9 @@ sol! {
         );
         event Redeemed(bytes32 indexed swapId, bytes32 indexed secretHash, bytes secret);
         event Refunded(bytes32 indexed swapId);
+        event DepositClaimed(bytes32 indexed swapId, address indexed to, uint256 amount);
+
+        function deposits(bytes32 swapId) external view returns (uint256);
         event OrderFilled(
             bytes32 indexed orderHash,
             bytes32 indexed swapId,
@@ -77,7 +81,7 @@ sol! {
             uint256 secretIndex,
             bytes32 secretHash,
             bytes32[] calldata proof
-        ) external returns (bytes32 swapId);
+        ) external payable returns (bytes32 swapId);
     }
 
     #[sol(rpc)]

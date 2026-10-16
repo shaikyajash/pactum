@@ -26,6 +26,9 @@ pub struct IntentRequest {
     pub src_lock: u64,
     pub parts: u16,
     pub receiver: Option<Address>,
+    /// Native deposit each fill must post; paid to whoever settles the escrow,
+    /// so keepers are paid to refund us if a resolver walks away.
+    pub min_deposit: U256,
 }
 
 pub struct OpenIntent {
@@ -84,6 +87,7 @@ impl Maker {
             parts: req.parts,
             secretsRoot: secrets.root(),
             nonce,
+            minDeposit: req.min_deposit,
         };
         let digest = order.digest(self.src.id, self.src.contract);
         let signature = self.signer.sign_hash_sync(&digest)?;

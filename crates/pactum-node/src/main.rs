@@ -87,6 +87,9 @@ enum Cmd {
         parts: u16,
         #[arg(long)]
         receiver: Option<Address>,
+        /// Native deposit (wei) each fill must post as a keeper incentive.
+        #[arg(long, default_value_t = U256::ZERO)]
+        min_deposit: U256,
     },
 }
 
@@ -153,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
             src_lock_secs,
             parts,
             receiver,
+            min_deposit,
         } => {
             let cfg = Config::load(&config)?;
             let src = Chain::connect(cfg.chain(&from)?, key.clone())?;
@@ -176,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
                         src_lock: src_lock_secs,
                         parts,
                         receiver,
+                        min_deposit,
                     },
                     nonce,
                 )

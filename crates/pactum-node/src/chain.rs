@@ -108,6 +108,10 @@ impl Chain {
         })
     }
 
+    pub async fn deposit(&self, swap_id: B256) -> anyhow::Result<U256> {
+        Ok(self.htlc().deposits(swap_id).call().await?)
+    }
+
     pub async fn progress(&self, order_hash: B256) -> anyhow::Result<(U256, usize)> {
         let f = self.htlc().fills(order_hash).call().await?;
         Ok((f.filled, f.nextIndex as usize))
@@ -186,6 +190,7 @@ impl Chain {
         let receipt = self
             .htlc()
             .fill(to_binding(order), signature, amount, U256::from(index), secret_hash, proof)
+            .value(order.minDeposit)
             .send()
             .await?
             .get_receipt()
