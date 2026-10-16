@@ -15,7 +15,7 @@ contract SecretRelayTest is Test {
     // real CCIP chain selectors for Ethereum and Base
     uint64 internal constant SEL_A = 5009297550715157269;
     uint64 internal constant SEL_B = 15971525489660198786;
-    uint256 internal constant GAS = 300_000;
+    uint256 internal constant GAS = 200_000; // per-entry budget
 
     MockCCIPRouter internal routerA;
     MockCCIPRouter internal routerB;
@@ -168,7 +168,7 @@ contract SecretRelayTest is Test {
     function test_ccipReceive_onlyRouter() public {
         (bytes32[] memory ids, bytes[] memory secrets) = _one(idA, secret);
         vm.expectRevert(SecretRelay.OnlyRouter.selector);
-        _receive(relayA, SEL_B, address(relayB), abi.encode(ids, secrets));
+        _receive(relayA, SEL_B, address(relayB), abi.encode(GAS, ids, secrets));
     }
 
     function test_ccipReceive_rejectsUntrustedPeer() public {
@@ -176,7 +176,7 @@ contract SecretRelayTest is Test {
         address rogue = makeAddr("rogue");
         vm.prank(address(routerA));
         vm.expectRevert(abi.encodeWithSelector(SecretRelay.UntrustedPeer.selector, SEL_B, rogue));
-        _receive(relayA, SEL_B, rogue, abi.encode(ids, secrets));
+        _receive(relayA, SEL_B, rogue, abi.encode(GAS, ids, secrets));
     }
 
     function test_ccipReceive_rejectsTrustedSenderFromWrongChain() public {
@@ -185,7 +185,7 @@ contract SecretRelayTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(SecretRelay.UntrustedPeer.selector, uint64(1), address(relayB))
         );
-        _receive(relayA, 1, address(relayB), abi.encode(ids, secrets));
+        _receive(relayA, 1, address(relayB), abi.encode(GAS, ids, secrets));
     }
 
     function test_relay_revertsWithoutPeer() public {
@@ -227,7 +227,7 @@ contract SecretRelayTest is Test {
         (bytes32[] memory ids, bytes[] memory secrets) = _one(idA, forged);
 
         vm.prank(address(routerA));
-        _receive(relayA, SEL_B, address(relayB), abi.encode(ids, secrets));
+        _receive(relayA, SEL_B, address(relayB), abi.encode(GAS, ids, secrets));
 
         if (sha256(forged) == secretHash) assertEq(resolver.balance, 1 ether);
         else assertEq(resolver.balance, 0);

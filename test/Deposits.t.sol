@@ -353,7 +353,7 @@ contract DepositsTest is Test {
             messageId: bytes32(uint256(1)),
             sourceChainSelector: 2,
             sender: abi.encode(peer),
-            data: abi.encode(ids, secrets),
+            data: abi.encode(uint256(200_000), ids, secrets),
             destTokenAmounts: new Client.EVMTokenAmount[](0)
         });
         vm.prank(address(router));
