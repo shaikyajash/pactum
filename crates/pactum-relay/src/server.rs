@@ -80,6 +80,9 @@ impl Relay {
     pub async fn release(&self, hash: B256, r: SecretRelease) -> Result<(), RelayError> {
         let mut orders = self.orders.write().await;
         let entry = orders.get_mut(&hash).ok_or(RelayError::UnknownOrder)?;
+        if r.secret.len() != secret::SECRET_LEN {
+            return Err(RelayError::BadSecret);
+        }
         let secret_hash = secret::sha256(&r.secret);
         if !SecretTree::verify(entry.signed.order.secretsRoot, r.index, secret_hash, &r.proof) {
             return Err(RelayError::BadSecret);
