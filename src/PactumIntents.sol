@@ -3,7 +3,6 @@ pragma solidity 0.8.24;
 
 import {HashLock} from "./HashLock.sol";
 import {MerkleSecrets} from "./lib/MerkleSecrets.sol";
-import {SafeTransfer} from "./lib/SafeTransfer.sol";
 import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 
 /// @title PactumIntents
@@ -48,8 +47,6 @@ import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 ///      `secretsRoot`, and must never reuse a `secretsRoot` (or its secrets) across
 ///      orders.
 contract PactumIntents is HashLock {
-    using SafeTransfer for address;
-
     struct Order {
         address maker;
         address receiver;
@@ -136,7 +133,7 @@ contract PactumIntents is HashLock {
         bytes32 orderHash = hashOrder(order);
         _consume(order, orderHash, signature, fillAmount, secretIndex, secretHash, proof);
         swapId = _open(order, orderHash, fillAmount, secretIndex, secretHash);
-        order.srcToken.safeTransferFrom(order.maker, address(this), fillAmount);
+        _pullExact(order.srcToken, order.maker, fillAmount);
     }
 
     /// @notice `fill`, first applying the maker's EIP-2612 permit for `srcToken`.

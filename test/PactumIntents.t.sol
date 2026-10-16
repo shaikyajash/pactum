@@ -6,6 +6,7 @@ import {HashLock} from "../src/HashLock.sol";
 import {PactumIntents} from "../src/PactumIntents.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockWallet} from "./mocks/MockWallet.sol";
+import {MockFeeERC20} from "./mocks/MockFeeERC20.sol";
 import {TreeBuilder} from "./MerkleSecrets.t.sol";
 
 contract PactumIntentsTest is Test {
@@ -269,6 +270,24 @@ contract PactumIntentsTest is Test {
         vm.prank(resolverA);
         vm.expectRevert(PactumIntents.OrderExpired.selector);
         intents.fill(o, sig, SRC, 0, hashes[0], proof);
+    }
+
+    /// audit-1 L-1: fills of fee-on-transfer tokens are rejected instead of
+    /// recording an escrow larger than what the contract received.
+    function test_fillRejectsFeeOnTransferToken() public {
+        MockFeeERC20 fot = new MockFeeERC20(100); // 1% fee
+        fot.mint(maker, SRC);
+        vm.prank(maker);
+        fot.approve(address(intents), type(uint256).max);
+
+        PactumIntents.Order memory o = _order(1);
+        o.srcToken = address(fot);
+        bytes memory sig = _sign(o, makerKey);
+        bytes32[] memory proof = new bytes32[](0);
+        vm.prank(resolverA);
+        vm.expectRevert(HashLock.UnsupportedToken.selector);
+        intents.fill(o, sig, SRC, 0, hashes[0], proof);
+        assertEq(fot.balanceOf(maker), SRC);
     }
 
     function test_cancel() public {

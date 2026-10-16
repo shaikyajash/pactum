@@ -15,6 +15,13 @@ library SafeTransfer {
         _call(token, abi.encodeWithSelector(0x23b872dd, from, to, amount));
     }
 
+    function balanceOf(address token, address account) internal view returns (uint256) {
+        if (token.code.length == 0) revert TokenTransferFailed();
+        (bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSelector(0x70a08231, account));
+        if (!ok || ret.length < 32) revert TokenTransferFailed();
+        return abi.decode(ret, (uint256));
+    }
+
     function sendNative(address to, uint256 amount) internal {
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert NativeTransferFailed();

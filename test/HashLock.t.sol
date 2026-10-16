@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {HashLock} from "../src/HashLock.sol";
 import {SafeTransfer} from "../src/lib/SafeTransfer.sol";
 import {MockERC20, NoReturnERC20} from "./mocks/MockERC20.sol";
+import {MockFeeERC20} from "./mocks/MockFeeERC20.sol";
 
 contract HashLockTest is Test {
     HashLock internal htlc;
@@ -195,6 +196,30 @@ contract HashLockTest is Test {
         vm.prank(alice);
         vm.expectRevert(SafeTransfer.TokenTransferFailed.selector);
         htlc.initiate(bob, address(usdc), 1, secretHash, expiry, 0);
+    }
+
+    /// audit-1 L-1: a fee-on-transfer token would leave the escrow holding less
+    /// than it recorded, so the last settler could not be paid.
+    function test_erc20_rejectsFeeOnTransferToken() public {
+        MockFeeERC20 fot = new MockFeeERC20(100); // 1% fee
+        fot.mint(alice, 100e18);
+        vm.startPrank(alice);
+        fot.approve(address(htlc), type(uint256).max);
+        vm.expectRevert(HashLock.UnsupportedToken.selector);
+        htlc.initiate(bob, address(fot), 100e18, secretHash, expiry, 0);
+        vm.stopPrank();
+        assertEq(fot.balanceOf(alice), 100e18);
+    }
+
+    function test_erc20_zeroFeeTokenAccepted() public {
+        MockFeeERC20 token = new MockFeeERC20(0);
+        token.mint(alice, 100e18);
+        vm.startPrank(alice);
+        token.approve(address(htlc), type(uint256).max);
+        bytes32 id = htlc.initiate(bob, address(token), 100e18, secretHash, expiry, 0);
+        vm.stopPrank();
+        htlc.redeem(id, secret);
+        assertEq(token.balanceOf(bob), 100e18);
     }
 
     // ---------------------------------------------------------------- fuzz

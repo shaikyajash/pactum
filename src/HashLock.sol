@@ -83,10 +83,13 @@ contract HashLock {
     error NotExpired();
     error InvalidSignature();
     error NothingToWithdraw();
+    error UnsupportedToken();
 
     /// @notice Lock `amount` of `token` for `redeemer` until `expiry`.
     /// @dev For native swaps `msg.value` must equal `amount`; for ERC20 it must be zero
-    ///      and the caller must have approved this contract.
+    ///      and the caller must have approved this contract. Fee-on-transfer tokens are
+    ///      rejected with `UnsupportedToken`; rebasing tokens are unsupported too (a
+    ///      later rebase would leave escrows over- or under-collateralised).
     function initiate(
         address redeemer,
         address token,
@@ -97,7 +100,7 @@ contract HashLock {
     ) external payable returns (bytes32 swapId) {
         if (msg.value != (token == NATIVE ? amount : 0)) revert InvalidValue();
         swapId = _create(msg.sender, redeemer, token, amount, secretHash, expiry, salt);
-        if (token != NATIVE) token.safeTransferFrom(msg.sender, address(this), amount);
+        if (token != NATIVE) _pullExact(token, msg.sender, amount);
     }
 
     /// @dev Records a swap without moving funds. Callers must ensure the contract
@@ -263,6 +266,16 @@ contract HashLock {
         depositCredit[msg.sender] = 0;
         emit DepositsWithdrawn(msg.sender, to, amount);
         address(to).sendNative(amount);
+    }
+
+    /// @dev Pulls exactly `amount` of `token` from `from`, reverting if the contract
+    ///      received any other amount (fee-on-transfer tokens), which would leave the
+    ///      escrow unable to pay out what it recorded.
+    function _pullExact(address token, address from, uint256 amount) internal {
+        uint256 before = token.balanceOf(address(this));
+        token.safeTransferFrom(from, address(this), amount);
+        uint256 received = token.balanceOf(address(this));
+        if (received < before || received - before != amount) revert UnsupportedToken();
     }
 
     function _payout(address token, address to, uint256 amount) internal {
