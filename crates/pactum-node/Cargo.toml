@@ -1,0 +1,27 @@
+[package]
+name = "pactum-node"
+description = "Maker agent, resolver daemon and CLI for Pactum cross-chain intents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pactum"
+path = "src/main.rs"
+
+[dependencies]
+pactum-core.workspace = true
+pactum-relay.workspace = true
+alloy = { workspace = true, features = ["full", "signer-local", "reqwest", "reqwest-rustls-tls"] }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+alloy = { workspace = true, features = ["node-bindings"] }
