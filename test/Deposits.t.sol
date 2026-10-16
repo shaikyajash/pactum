@@ -3,10 +3,10 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {PactumIntents} from "../src/PactumIntents.sol";
-import {SecretRelay} from "../src/layerzero/SecretRelay.sol";
-import {Origin} from "../src/layerzero/ILayerZeroEndpointV2.sol";
+import {SecretRelay} from "../src/ccip/SecretRelay.sol";
+import {Client, IRouterClient} from "../src/ccip/Client.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockEndpoint} from "./mocks/MockEndpoint.sol";
+import {MockCCIPRouter} from "./mocks/MockCCIPRouter.sol";
 
 /// @dev A redeemer contract that refuses plain ETH transfers.
 contract EthRejecter {
@@ -130,15 +130,10 @@ contract DepositsTest is Test {
 
     // ----------------------------------------------------------- SecretRelay
 
-    function _relayed(address redeemer)
-        internal
-        returns (SecretRelay relay, MockEndpoint lz, bytes32 id)
-    {
-        lz = new MockEndpoint(1);
-        MockEndpoint remote = new MockEndpoint(2);
-        lz.connect(remote);
-        relay = new SecretRelay(address(lz), intents, address(this));
-        bytes32 peer = bytes32(uint256(uint160(makeAddr("remoteRelay"))));
+    function _relayed(address redeemer) internal returns (SecretRelay relay, bytes32 id) {
+        MockCCIPRouter router = new MockCCIPRouter(1);
+        relay = new SecretRelay(IRouterClient(address(router)), intents, address(this));
+        address peer = makeAddr("remoteRelay");
         relay.setPeer(2, peer);
         vm.deal(redeemer, 1 ether);
         id = _fill(redeemer, DEPOSIT);
@@ -147,12 +142,19 @@ contract DepositsTest is Test {
         bytes[] memory secrets = new bytes[](1);
         ids[0] = id;
         secrets[0] = secret;
-        vm.prank(address(lz));
-        relay.lzReceive(Origin(2, peer, 1), 0, abi.encode(ids, secrets), address(0), "");
+        Client.Any2EVMMessage memory m = Client.Any2EVMMessage({
+            messageId: bytes32(uint256(1)),
+            sourceChainSelector: 2,
+            sender: abi.encode(peer),
+            data: abi.encode(ids, secrets),
+            destTokenAmounts: new Client.EVMTokenAmount[](0)
+        });
+        vm.prank(address(router));
+        relay.ccipReceive(m);
     }
 
     function test_relayForwardsDepositToRedeemer() public {
-        (SecretRelay relay,,) = _relayed(resolver);
+        (SecretRelay relay,) = _relayed(resolver);
         assertEq(usdc.balanceOf(resolver), SRC);
         assertEq(resolver.balance, 1 ether, "deposit returned through the relay");
         assertEq(address(relay).balance, 0);
@@ -160,7 +162,7 @@ contract DepositsTest is Test {
 
     function test_relayFallsBackToClaimWhenPushFails() public {
         EthRejecter rejecter = new EthRejecter();
-        (SecretRelay relay,,) = _relayed(address(rejecter));
+        (SecretRelay relay,) = _relayed(address(rejecter));
 
         assertEq(usdc.balanceOf(address(rejecter)), SRC, "redemption still succeeded");
         assertEq(relay.unclaimed(address(rejecter)), DEPOSIT);
@@ -171,7 +173,7 @@ contract DepositsTest is Test {
     }
 
     function test_relayRejectsStrayEth() public {
-        (SecretRelay relay,,) = _relayed(resolver);
+        (SecretRelay relay,) = _relayed(resolver);
         vm.expectRevert(SecretRelay.OnlyHashLock.selector);
         payable(address(relay)).transfer(1);
     }
