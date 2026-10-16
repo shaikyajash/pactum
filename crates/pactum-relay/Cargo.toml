@@ -1,0 +1,22 @@
+[package]
+name = "pactum-relay"
+description = "Untrusted order relay for Pactum intents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pactum-core.workspace = true
+alloy = { workspace = true, features = ["sol-types", "std", "k256", "serde"] }
+anyhow.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+alloy = { workspace = true, features = ["signer-local"] }
