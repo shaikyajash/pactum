@@ -34,6 +34,19 @@ import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 ///                         76..99 -> 3         100    -> 4
 ///
 ///      With `parts == 1` the order must be filled in one go with secret 0.
+///
+///      Safety deposits: each fill posts `msg.value >= minDeposit` (see
+///      `HashLock.deposits`). Redeeming credits it back to the resolver; an expired
+///      fill refunded by anyone pays the caller a `KEEPER_TIP_BPS` tip and credits
+///      the rest to the maker, so filling and abandoning an order costs a griefer
+///      90% of its deposit. This path deliberately favours makers: resolvers are
+///      expected to avoid makers who withhold the secret after a valid counter-lock.
+///
+///      Refunds never roll back `fills[].filled` or `nextIndex`: the secret of a
+///      refunded fill may already have leaked, so its index must stay spent. A maker
+///      whose order was griefed this way must re-sign a fresh order with a NEW
+///      `secretsRoot`, and must never reuse a `secretsRoot` (or its secrets) across
+///      orders.
 contract PactumIntents is HashLock {
     using SafeTransfer for address;
 
@@ -246,7 +259,7 @@ contract PactumIntents is HashLock {
             uint64(block.timestamp) + order.srcLock,
             keccak256(abi.encode(orderHash, secretIndex))
         );
-        // the whole msg.value is the deposit; refunded to whoever settles this escrow
+        // the whole msg.value is the deposit; credited on settlement (see HashLock.deposits)
         deposits[swapId] = msg.value;
         emit OrderFilled(
             orderHash,

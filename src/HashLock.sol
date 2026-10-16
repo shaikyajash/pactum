@@ -20,6 +20,10 @@ contract HashLock {
     );
     bytes32 public constant REFUND_TYPEHASH = keccak256("Refund(bytes32 swapId)");
 
+    /// @notice Share of a deposit paid to whoever calls `refund` on an expired swap,
+    ///         in basis points. The rest goes to the swap's initiator.
+    uint256 public constant KEEPER_TIP_BPS = 1_000;
+
     struct Swap {
         address initiator;
         uint64 expiry;
@@ -32,9 +36,27 @@ contract HashLock {
 
     mapping(bytes32 swapId => Swap) public swaps;
 
-    /// @notice Native-asset safety deposit attached to a swap. Paid to whoever
-    ///         settles it, so third parties are paid to finish abandoned swaps.
+    /// @notice Native-asset safety deposit attached to a swap, held until it settles.
+    /// @dev On settlement the deposit is never sent inline; it is credited to
+    ///      `depositCredit` and pulled with `withdrawDeposits`, so a party that
+    ///      rejects ETH (or a contract without `receive`) can never block settlement.
+    ///
+    ///      Who is credited:
+    ///      - `redeem`:        the swap's `redeemer` (the resolver that posted it),
+    ///                         no matter who submits the secret.
+    ///      - `instantRefund`: the swap's `redeemer`, who consented to the unwind.
+    ///      - `refund`:        `KEEPER_TIP_BPS` to the caller as a keeper tip, the rest
+    ///                         to the swap's `initiator` (the maker) as compensation for
+    ///                         having funds locked by an abandoned fill. A resolver that
+    ///                         griefs by filling and refunding itself loses 90%.
+    ///
+    ///      Trade-off: the expiry path favours makers over resolvers. A maker can
+    ///      withhold the secret after a valid counter-lock and collect the deposit
+    ///      at expiry; resolvers are expected to avoid makers who do that.
     mapping(bytes32 swapId => uint256) public deposits;
+
+    /// @notice Settled deposits owed to each account; withdraw with `withdrawDeposits`.
+    mapping(address account => uint256) public depositCredit;
 
     event Initiated(
         bytes32 indexed swapId,
@@ -47,7 +69,8 @@ contract HashLock {
     );
     event Redeemed(bytes32 indexed swapId, bytes32 indexed secretHash, bytes secret);
     event Refunded(bytes32 indexed swapId);
-    event DepositClaimed(bytes32 indexed swapId, address indexed to, uint256 amount);
+    event DepositCredited(bytes32 indexed swapId, address indexed to, uint256 amount);
+    event DepositsWithdrawn(address indexed account, address indexed to, uint256 amount);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -59,6 +82,7 @@ contract HashLock {
     error InvalidSecret();
     error NotExpired();
     error InvalidSignature();
+    error NothingToWithdraw();
 
     /// @notice Lock `amount` of `token` for `redeemer` until `expiry`.
     /// @dev For native swaps `msg.value` must equal `amount`; for ERC20 it must be zero
@@ -115,19 +139,21 @@ contract HashLock {
 
         s.settled = true;
         emit Redeemed(swapId, s.secretHash, secret);
+        _creditDeposit(swapId, s.redeemer, 0);
         _payout(s.token, s.redeemer, s.amount);
-        _claimDeposit(swapId);
     }
 
     /// @notice Return funds to the initiator after expiry.
+    /// @dev Callable by anyone. The caller earns `KEEPER_TIP_BPS` of the deposit and
+    ///      the initiator is credited the rest (see `deposits`).
     function refund(bytes32 swapId) external {
         Swap storage s = _live(swapId);
         if (block.timestamp < s.expiry) revert NotExpired();
 
         s.settled = true;
         emit Refunded(swapId);
+        _creditDeposit(swapId, s.initiator, KEEPER_TIP_BPS);
         _payout(s.token, s.initiator, s.amount);
-        _claimDeposit(swapId);
     }
 
     /// @notice Refund before expiry with the redeemer's consent.
@@ -140,8 +166,20 @@ contract HashLock {
 
         s.settled = true;
         emit Refunded(swapId);
+        _creditDeposit(swapId, s.redeemer, 0);
         _payout(s.token, s.initiator, s.amount);
-        _claimDeposit(swapId);
+    }
+
+    /// @notice Withdraw all deposits credited to the caller.
+    function withdrawDeposits() external {
+        _withdraw(payable(msg.sender));
+    }
+
+    /// @notice Withdraw all deposits credited to the caller, sending them to `to`.
+    /// @dev Lets contracts that cannot receive ETH route their credit elsewhere.
+    function withdrawDepositsTo(address payable to) external {
+        if (to == address(0)) revert ZeroAddress();
+        _withdraw(to);
     }
 
     function refundDigest(bytes32 swapId) public view returns (bytes32) {
@@ -204,13 +242,27 @@ contract HashLock {
         if (signer == address(0)) revert InvalidSignature();
     }
 
-    /// @dev Pays the swap's safety deposit, if any, to the caller that settled it.
-    function _claimDeposit(bytes32 swapId) internal {
+    /// @dev Moves the swap's deposit, if any, into the pull ledger: `tipBps` of it to
+    ///      the caller and the remainder to `to`. Never sends ETH.
+    function _creditDeposit(bytes32 swapId, address to, uint256 tipBps) internal {
         uint256 amount = deposits[swapId];
         if (amount == 0) return;
         deposits[swapId] = 0;
-        emit DepositClaimed(swapId, msg.sender, amount);
-        msg.sender.sendNative(amount);
+        uint256 tip = amount * tipBps / 10_000;
+        if (tip != 0) {
+            depositCredit[msg.sender] += tip;
+            emit DepositCredited(swapId, msg.sender, tip);
+        }
+        depositCredit[to] += amount - tip;
+        emit DepositCredited(swapId, to, amount - tip);
+    }
+
+    function _withdraw(address payable to) internal {
+        uint256 amount = depositCredit[msg.sender];
+        if (amount == 0) revert NothingToWithdraw();
+        depositCredit[msg.sender] = 0;
+        emit DepositsWithdrawn(msg.sender, to, amount);
+        address(to).sendNative(amount);
     }
 
     function _payout(address token, address to, uint256 amount) internal {
