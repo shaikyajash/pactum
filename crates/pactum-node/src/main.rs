@@ -6,7 +6,9 @@ use alloy::{
 };
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use pactum_node::{Chain, IntentFiller, IntentRequest, Maker, config::Config, filler::FixedRate};
+use pactum_node::{
+    Chain, IntentFiller, IntentRequest, Keeper, Maker, config::Config, filler::FixedRate,
+};
 use pactum_relay::{Relay, RelayClient};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -46,6 +48,24 @@ enum Cmd {
         #[arg(long)]
         budget: Option<U256>,
         #[arg(long, default_value_t = 2_000)]
+        interval_ms: u64,
+        /// Persist open jobs here and resume them on restart.
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
+    /// Refund expired escrows that carry a safety deposit, earning the keeper reward.
+    Keeper {
+        #[arg(short, long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(long, env = "KEEPER_KEY", hide_env_values = true)]
+        key: PrivateKeySigner,
+        /// Skip escrows whose deposit is below this (wei).
+        #[arg(long, default_value_t = U256::ZERO)]
+        min_reward: U256,
+        /// Block to start scanning from (defaults to the current head).
+        #[arg(long)]
+        from_block: Option<u64>,
+        #[arg(long, default_value_t = 5_000)]
         interval_ms: u64,
     },
     /// Sign and post an intent, then release secrets as fills are secured.
@@ -94,6 +114,10 @@ enum Cmd {
         /// USDC) instead of requiring a prior approve.
         #[arg(long)]
         permit_version: Option<String>,
+        /// Persist the intent and its secrets here (owner-only file). If the file
+        /// already holds an intent, resume it instead of opening a new one.
+        #[arg(long)]
+        state: Option<PathBuf>,
     },
 }
 
@@ -115,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
             max_fill_bps,
             budget,
             interval_ms,
+            state,
         } => {
             let cfg = Config::load(&config)?;
             let chains = cfg
@@ -130,12 +155,40 @@ async fn main() -> anyhow::Result<()> {
             if let Some(b) = budget {
                 filler = filler.with_budget(b);
             }
+            if let Some(path) = state {
+                filler = filler.with_store(path)?;
+            }
             info!(resolver = %key.address(), "resolving");
             let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
                         if let Err(e) = filler.tick().await {
+                            tracing::warn!("tick failed: {e:#}");
+                        }
+                    }
+                    _ = tokio::signal::ctrl_c() => break Ok(()),
+                }
+            }
+        }
+
+        Cmd::Keeper { config, key, min_reward, from_block, interval_ms } => {
+            let cfg = Config::load(&config)?;
+            let chains = cfg
+                .chains
+                .iter()
+                .map(|c| Chain::connect(c, key.clone()))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let mut keeper = Keeper::new(chains, min_reward);
+            if let Some(b) = from_block {
+                keeper = keeper.from_block(b);
+            }
+            info!(keeper = %key.address(), "keeping");
+            let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if let Err(e) = keeper.tick().await {
                             tracing::warn!("tick failed: {e:#}");
                         }
                     }
@@ -162,36 +215,44 @@ async fn main() -> anyhow::Result<()> {
             receiver,
             min_deposit,
             permit_version,
+            state,
         } => {
             let cfg = Config::load(&config)?;
             let src = Chain::connect(cfg.chain(&from)?, key.clone())?;
             let dst = Chain::connect(cfg.chain(&to)?, key.clone())?;
             let deadline_chain = src.clone();
-            let maker = Maker::new(src, dst, key, RelayClient::new(relay));
+            let mut maker = Maker::new(src, dst, key, RelayClient::new(relay));
+            if let Some(path) = state {
+                maker = maker.with_store(path);
+            }
 
             let nonce = U256::from(
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
             );
-            let mut intent = maker
-                .open(
-                    IntentRequest {
-                        src_token: sell_token,
-                        src_amount: sell_amount,
-                        dst_token: buy_token,
-                        start_dst_amount: start,
-                        end_dst_amount: floor,
-                        auction_duration: auction_secs,
-                        ttl: ttl_secs,
-                        src_lock: src_lock_secs,
-                        parts,
-                        receiver,
-                        min_deposit,
-                        permit_version,
-                    },
-                    nonce,
-                )
-                .await
-                .context("opening intent")?;
+            let resumed = maker.resume()?;
+            let mut intent = match resumed {
+                Some(intent) => intent,
+                None => maker
+                    .open(
+                        IntentRequest {
+                            src_token: sell_token,
+                            src_amount: sell_amount,
+                            dst_token: buy_token,
+                            start_dst_amount: start,
+                            end_dst_amount: floor,
+                            auction_duration: auction_secs,
+                            ttl: ttl_secs,
+                            src_lock: src_lock_secs,
+                            parts,
+                            receiver,
+                            min_deposit,
+                            permit_version,
+                        },
+                        nonce,
+                    )
+                    .await
+                    .context("opening intent")?,
+            };
             println!("{}", intent.hash);
 
             let all = pactum_core::OrderSecrets::count_for(parts);
