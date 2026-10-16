@@ -32,6 +32,10 @@ contract HashLock {
 
     mapping(bytes32 swapId => Swap) public swaps;
 
+    /// @notice Native-asset safety deposit attached to a swap. Paid to whoever
+    ///         settles it, so third parties are paid to finish abandoned swaps.
+    mapping(bytes32 swapId => uint256) public deposits;
+
     event Initiated(
         bytes32 indexed swapId,
         address indexed initiator,
@@ -43,6 +47,7 @@ contract HashLock {
     );
     event Redeemed(bytes32 indexed swapId, bytes32 indexed secretHash, bytes secret);
     event Refunded(bytes32 indexed swapId);
+    event DepositClaimed(bytes32 indexed swapId, address indexed to, uint256 amount);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -111,6 +116,7 @@ contract HashLock {
         s.settled = true;
         emit Redeemed(swapId, s.secretHash, secret);
         _payout(s.token, s.redeemer, s.amount);
+        _claimDeposit(swapId);
     }
 
     /// @notice Return funds to the initiator after expiry.
@@ -121,6 +127,7 @@ contract HashLock {
         s.settled = true;
         emit Refunded(swapId);
         _payout(s.token, s.initiator, s.amount);
+        _claimDeposit(swapId);
     }
 
     /// @notice Refund before expiry with the redeemer's consent.
@@ -134,6 +141,7 @@ contract HashLock {
         s.settled = true;
         emit Refunded(swapId);
         _payout(s.token, s.initiator, s.amount);
+        _claimDeposit(swapId);
     }
 
     function refundDigest(bytes32 swapId) public view returns (bytes32) {
@@ -194,6 +202,15 @@ contract HashLock {
         }
         signer = ecrecover(digest, v, r, s);
         if (signer == address(0)) revert InvalidSignature();
+    }
+
+    /// @dev Pays the swap's safety deposit, if any, to the caller that settled it.
+    function _claimDeposit(bytes32 swapId) internal {
+        uint256 amount = deposits[swapId];
+        if (amount == 0) return;
+        deposits[swapId] = 0;
+        emit DepositClaimed(swapId, msg.sender, amount);
+        msg.sender.sendNative(amount);
     }
 
     function _payout(address token, address to, uint256 amount) internal {
