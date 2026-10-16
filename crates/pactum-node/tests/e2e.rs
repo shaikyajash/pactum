@@ -80,10 +80,17 @@ async fn gasless_split_intent_across_two_chains() {
     // fully gasless: the maker never sent a transaction on either chain
     assert_eq!(env.nonce(&env.a, maker_addr).await, 0);
     assert_eq!(env.nonce(&env.b, maker_addr).await, 0);
+
+    // resolvers swept their deposits back out of the pull ledger
+    let a = Chain::connect(&env.cfg_a, env.maker()).unwrap();
+    for r in [env.resolver_a().address(), env.resolver_b().address()] {
+        assert_eq!(a.deposit_credit(r).await.unwrap(), U256::ZERO);
+    }
 }
 
 /// A rogue resolver locks the maker's funds and never mirrors the lock. After
-/// the source lock expires a keeper refunds the maker for the deposit reward.
+/// the source lock expires a keeper refunds the maker and earns a 10% tip; the
+/// other 90% of the rogue's deposit is credited to the maker as compensation.
 #[tokio::test]
 async fn abandoned_fill_is_refunded_by_keeper() {
     let Some(env) = Env::setup().await else { return };
@@ -119,6 +126,20 @@ async fn abandoned_fill_is_refunded_by_keeper() {
     assert_eq!(keeper.refunded, vec![(env.cfg_a.id, fill.swap_id)]);
     assert_eq!(env.usdc_of(maker_addr).await, thousand(), "maker made whole");
     assert_eq!(env.nonce(&env.a, maker_addr).await, 0, "without sending a transaction");
+
+    let deposit = parse_ether("0.01").unwrap();
+    let maker_chain = Chain::connect(&env.cfg_a, env.maker()).unwrap();
+    assert_eq!(
+        maker_chain.deposit_credit(maker_addr).await.unwrap(),
+        deposit * U256::from(9) / U256::from(10),
+        "maker compensated with 90% of the rogue's deposit"
+    );
+    let keeper_addr = env.keeper().address();
+    assert_eq!(
+        maker_chain.deposit_credit(keeper_addr).await.unwrap(),
+        U256::ZERO,
+        "keeper already withdrew its tip"
+    );
 }
 
 /// A resolver crashes after filling; a fresh process with the same state file
