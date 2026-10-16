@@ -1,6 +1,6 @@
-//! Maker sells 1000 USDC on chain A for ETH on chain B with one signed intent.
-//! Two resolvers compete in the Dutch auction and split the order. The maker
-//! sends no transaction besides a one-time token approval.
+//! Maker sells 1000 USDC on chain A for ETH on chain B with one signed intent
+//! and one signed EIP-2612 permit. Two resolvers compete in the Dutch auction
+//! and split the order. The maker never sends a transaction on either chain.
 
 use std::{path::PathBuf, process::Command};
 
@@ -23,7 +23,6 @@ sol! {
     #[sol(rpc)]
     interface MockToken {
         function mint(address to, uint256 amount) external;
-        function approve(address spender, uint256 amount) external returns (bool);
         function balanceOf(address owner) external view returns (uint256);
     }
 }
@@ -87,7 +86,7 @@ async fn gasless_split_intent_across_two_chains() {
         contract: deploy(&b, intents).await,
     };
     let usdc_addr = deploy(&a, {
-        let mut code = bytecode("MockERC20.sol", "MockERC20").to_vec();
+        let mut code = bytecode("MockPermitERC20.sol", "MockPermitERC20").to_vec();
         code.extend(alloy::sol_types::SolValue::abi_encode_params(&(
             "USD Coin".to_string(),
             "USDC".to_string(),
@@ -120,16 +119,6 @@ async fn gasless_split_intent_across_two_chains() {
         .get_receipt()
         .await
         .unwrap();
-    // the maker's only transaction ever: a one-time approval
-    usdc(maker_key.clone())
-        .approve(cfg_a.contract, U256::MAX)
-        .send()
-        .await
-        .unwrap()
-        .get_receipt()
-        .await
-        .unwrap();
-
     let chains = |s: &PrivateKeySigner| {
         vec![Chain::connect(&cfg_a, s.clone()).unwrap(), Chain::connect(&cfg_b, s.clone()).unwrap()]
     };
@@ -165,7 +154,7 @@ async fn gasless_split_intent_across_two_chains() {
                 parts: 4,
                 receiver: None,
                 min_deposit: parse_ether("0.01").unwrap(),
-                permit_version: None,
+                permit_version: Some("1".into()),
             },
             U256::from(1),
         )
@@ -205,8 +194,8 @@ async fn gasless_split_intent_across_two_chains() {
     assert_eq!(token.balanceOf(res_a.address()).call().await.unwrap(), parse_ether("600").unwrap());
     assert_eq!(token.balanceOf(res_b.address()).call().await.unwrap(), parse_ether("400").unwrap());
 
-    // gasless: nothing sent on B, only the approval on A
+    // fully gasless: the maker never sent a transaction on either chain
     let pa = ProviderBuilder::new().connect_http(a.endpoint_url());
     assert_eq!(pb.get_transaction_count(maker_addr).await.unwrap(), 0);
-    assert_eq!(pa.get_transaction_count(maker_addr).await.unwrap(), 1);
+    assert_eq!(pa.get_transaction_count(maker_addr).await.unwrap(), 0);
 }
