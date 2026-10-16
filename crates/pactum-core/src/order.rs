@@ -9,11 +9,11 @@ sol! {
     #[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct Order {
         address maker;
-        address receiver;
+        bytes32 receiver;
         address srcToken;
         uint256 srcAmount;
         uint256 dstChainId;
-        address dstToken;
+        bytes32 dstToken;
         uint256 startDstAmount;
         uint256 endDstAmount;
         uint64 auctionStart;
@@ -83,8 +83,8 @@ mod tests {
     fn typehash_matches_contract() {
         // keccak256 of the type string in PactumIntents.ORDER_TYPEHASH
         let expected = alloy::primitives::keccak256(
-            "Order(address maker,address receiver,address srcToken,uint256 srcAmount,\
-             uint256 dstChainId,address dstToken,uint256 startDstAmount,uint256 endDstAmount,\
+            "Order(address maker,bytes32 receiver,address srcToken,uint256 srcAmount,\
+             uint256 dstChainId,bytes32 dstToken,uint256 startDstAmount,uint256 endDstAmount,\
              uint64 auctionStart,uint64 auctionEnd,uint64 deadline,uint64 srcLock,uint16 parts,\
              bytes32 secretsRoot,uint256 nonce,uint256 minDeposit)",
         );

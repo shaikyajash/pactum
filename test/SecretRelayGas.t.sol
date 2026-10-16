@@ -86,11 +86,11 @@ contract SecretRelayGasTest is Test {
         bytes32 h = sha256(s);
         PactumIntents.Order memory o = PactumIntents.Order({
             maker: maker,
-            receiver: maker,
+            receiver: bytes32(uint256(uint160(maker))),
             srcToken: address(usdc),
             srcAmount: SRC,
             dstChainId: 8453,
-            dstToken: address(0),
+            dstToken: bytes32(0),
             startDstAmount: 1 ether,
             endDstAmount: 1 ether,
             auctionStart: uint64(block.timestamp),

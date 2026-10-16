@@ -12,11 +12,11 @@ sol! {
     contract PactumIntents {
         struct Order {
             address maker;
-            address receiver;
+            bytes32 receiver;
             address srcToken;
             uint256 srcAmount;
             uint256 dstChainId;
-            address dstToken;
+            bytes32 dstToken;
             uint256 startDstAmount;
             uint256 endDstAmount;
             uint64 auctionStart;

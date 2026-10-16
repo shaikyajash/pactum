@@ -49,11 +49,15 @@ import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 contract PactumIntents is HashLock {
     struct Order {
         address maker;
-        address receiver;
+        /// destination-chain recipient: a left-padded EVM address, a Solana
+        /// pubkey, or a Bitcoin x-only Taproot key, depending on `dstChainId`
+        bytes32 receiver;
         address srcToken;
         uint256 srcAmount;
+        /// EVM chain id, or a CAIP-2 derived id for non-EVM chains (see docs)
         uint256 dstChainId;
-        address dstToken;
+        /// destination asset in the same encoding as `receiver`; 0 = native
+        bytes32 dstToken;
         uint256 startDstAmount;
         uint256 endDstAmount;
         uint64 auctionStart;
@@ -68,8 +72,8 @@ contract PactumIntents is HashLock {
     }
 
     bytes32 public constant ORDER_TYPEHASH = keccak256(
-        "Order(address maker,address receiver,address srcToken,uint256 srcAmount,"
-        "uint256 dstChainId,address dstToken,uint256 startDstAmount,uint256 endDstAmount,"
+        "Order(address maker,bytes32 receiver,address srcToken,uint256 srcAmount,"
+        "uint256 dstChainId,bytes32 dstToken,uint256 startDstAmount,uint256 endDstAmount,"
         "uint64 auctionStart,uint64 auctionEnd,uint64 deadline,uint64 srcLock,uint16 parts,"
         "bytes32 secretsRoot,uint256 nonce,uint256 minDeposit)"
     );
@@ -291,7 +295,7 @@ contract PactumIntents is HashLock {
             o.srcToken == NATIVE // gasless pull needs an allowance
                 || o.srcAmount == 0 || o.parts == 0 || o.parts > MAX_PARTS
                 || o.startDstAmount < o.endDstAmount || o.auctionEnd < o.auctionStart
-                || o.srcLock == 0 || o.receiver == address(0)
+                || o.srcLock == 0 || o.receiver == bytes32(0)
         ) {
             revert BadOrder();
         }

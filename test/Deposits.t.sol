@@ -83,11 +83,11 @@ contract DepositsTest is Test {
         bytes32 root = keccak256(bytes.concat(keccak256(abi.encode(uint256(0), secretHash))));
         return PactumIntents.Order({
             maker: maker,
-            receiver: receiver,
+            receiver: bytes32(uint256(uint160(receiver))),
             srcToken: address(usdc),
             srcAmount: SRC,
             dstChainId: 8453,
-            dstToken: address(0),
+            dstToken: bytes32(0),
             startDstAmount: 1 ether,
             endDstAmount: 1 ether,
             auctionStart: uint64(block.timestamp),

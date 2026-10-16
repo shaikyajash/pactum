@@ -12,7 +12,7 @@ fn request(env: &Env, parts: u16) -> IntentRequest {
     IntentRequest {
         src_token: env.usdc,
         src_amount: thousand(),
-        dst_token: NATIVE,
+        dst_token: NATIVE.into_word(),
         start_dst_amount: parse_ether("0.5").unwrap(),
         end_dst_amount: parse_ether("0.25").unwrap(),
         auction_duration: 600,

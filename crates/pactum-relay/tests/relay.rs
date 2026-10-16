@@ -15,7 +15,7 @@ async fn spawn() -> RelayClient {
 fn signed(signer: &PrivateKeySigner, maker: Address, secrets: &OrderSecrets) -> SignedOrder {
     let order = Order {
         maker,
-        receiver: maker,
+        receiver: maker.into_word(),
         srcToken: Address::repeat_byte(1),
         srcAmount: U256::from(1000),
         parts: 4,

@@ -4,6 +4,7 @@ use alloy::primitives::{B256, U256};
 use pactum_core::{
     Order, SecretTree,
     auction::{owed, secret_index},
+    chains::word_to_evm,
     timelock::TimelockPolicy,
 };
 use pactum_relay::{OpenOrder, RelayClient};
@@ -149,10 +150,16 @@ impl<B: Bid> IntentFiller<B> {
 
     async fn try_fill(&mut self, o: &OpenOrder) -> anyhow::Result<()> {
         let order = &o.signed.order;
-        let (Some(src), Some(dst)) = (
-            self.chains.get(&o.signed.src_chain_id),
-            self.chains.get(&order.dstChainId.to::<u64>()),
-        ) else {
+        // non-EVM destinations have 256-bit ids; only EVM ids fit in u64
+        let Ok(dst_id) = u64::try_from(order.dstChainId) else { return Ok(()) };
+        let (Some(src), Some(dst)) =
+            (self.chains.get(&o.signed.src_chain_id), self.chains.get(&dst_id))
+        else {
+            return Ok(());
+        };
+        let (Some(receiver), Some(dst_token)) =
+            (word_to_evm(order.receiver), word_to_evm(order.dstToken))
+        else {
             return Ok(());
         };
 
@@ -208,16 +215,9 @@ impl<B: Bid> IntentFiller<B> {
             return Ok(());
         };
 
-        dst.ensure_allowance(order.dstToken, fill.owed).await?;
+        dst.ensure_allowance(dst_token, fill.owed).await?;
         let dst_swap = dst
-            .initiate(
-                order.receiver,
-                order.dstToken,
-                fill.owed,
-                secret_hash,
-                dst_expiry,
-                fill.swap_id,
-            )
+            .initiate(receiver, dst_token, fill.owed, secret_hash, dst_expiry, fill.swap_id)
             .await?;
 
         info!(order = %o.hash, %amount, index, owed = %fill.owed, "filled");

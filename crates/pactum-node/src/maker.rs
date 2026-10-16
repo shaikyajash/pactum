@@ -7,6 +7,7 @@ use alloy::{
 use anyhow::ensure;
 use pactum_core::{
     Order, OrderSecrets, Secret,
+    chains::{evm_to_word, word_to_evm},
     permit::{Permit, SignedPermit, TokenDomain},
     timelock::TimelockPolicy,
 };
@@ -19,7 +20,8 @@ use crate::{Chain, store::JsonStore};
 pub struct IntentRequest {
     pub src_token: Address,
     pub src_amount: U256,
-    pub dst_token: Address,
+    /// Destination asset as a 32-byte word (see `pactum_core::chains`); zero = native.
+    pub dst_token: B256,
     /// Opening ask for the whole order; decays linearly to `end_dst_amount`.
     pub start_dst_amount: U256,
     pub end_dst_amount: U256,
@@ -29,7 +31,8 @@ pub struct IntentRequest {
     /// Lock on each source escrow.
     pub src_lock: u64,
     pub parts: u16,
-    pub receiver: Option<Address>,
+    /// Destination recipient as a 32-byte word; defaults to the maker's EVM address.
+    pub receiver: Option<B256>,
     /// Native deposit each fill must post; paid to whoever settles the escrow,
     /// so keepers are paid to refund us if a resolver walks away.
     pub min_deposit: U256,
@@ -144,7 +147,7 @@ impl Maker {
         let maker = self.signer.address();
         let order = Order {
             maker,
-            receiver: req.receiver.unwrap_or(maker),
+            receiver: req.receiver.unwrap_or(evm_to_word(maker)),
             srcToken: req.src_token,
             srcAmount: req.src_amount,
             dstChainId: U256::from(self.dst.id),
@@ -221,10 +224,12 @@ impl Maker {
     /// Release secrets for fills whose destination lock checks out.
     pub async fn tick(&self, intent: &mut OpenIntent) -> anyhow::Result<()> {
         let fills = intent_fills(self, intent).await?;
-        let locks = self
-            .dst
-            .locks_to(intent.order.receiver, intent.dst_from, self.dst.head().await?)
-            .await?;
+        let (Some(receiver), Some(dst_token)) =
+            (word_to_evm(intent.order.receiver), word_to_evm(intent.order.dstToken))
+        else {
+            anyhow::bail!("destination is not an EVM chain");
+        };
+        let locks = self.dst.locks_to(receiver, intent.dst_from, self.dst.head().await?).await?;
 
         for f in fills {
             if intent.released.contains(&f.secret_index) {
@@ -235,7 +240,7 @@ impl Maker {
 
             let lock = locks.iter().find(|l| {
                 l.initiator == f.resolver
-                    && l.token == intent.order.dstToken
+                    && l.token == dst_token
                     && l.secret_hash == secret.hash
                     && l.amount >= f.owed
                     // we must be able to redeem on dst before either side can refund

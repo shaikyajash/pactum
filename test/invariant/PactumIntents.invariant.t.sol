@@ -42,11 +42,11 @@ contract IntentsHandler is Test {
         (bytes32 root,) = TreeBuilder.rootAndProof(hashes, 0);
         order = PactumIntents.Order({
             maker: maker,
-            receiver: maker,
+            receiver: bytes32(uint256(uint160(maker))),
             srcToken: address(token),
             srcAmount: 1_000_000,
             dstChainId: 10,
-            dstToken: address(0),
+            dstToken: bytes32(0),
             startDstAmount: 2e18,
             endDstAmount: 1e18,
             auctionStart: uint64(block.timestamp),
