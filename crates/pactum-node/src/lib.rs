@@ -2,6 +2,7 @@
 //! secrets, and the resolver that competes in the Dutch auction to fill them.
 
 pub mod chain;
+pub mod config;
 pub mod contracts;
 pub mod filler;
 pub mod maker;
