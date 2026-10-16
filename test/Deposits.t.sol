@@ -65,7 +65,7 @@ contract DepositsTest is Test {
 
     uint256 internal constant SRC = 100e18;
     uint256 internal constant DEPOSIT = 0.01 ether;
-    bytes internal secret = "deposit-test-secret";
+    bytes internal secret = abi.encode(keccak256("deposit-test-secret"));
     bytes32 internal secretHash;
 
     function setUp() public {

@@ -34,7 +34,7 @@ contract PactumIntentsTest is Test {
         usdc.approve(address(intents), type(uint256).max);
 
         for (uint256 i; i <= PARTS; ++i) {
-            secrets.push(abi.encode("maker secret", i));
+            secrets.push(abi.encode(keccak256(abi.encode("maker secret", i))));
             hashes.push(sha256(secrets[i]));
         }
     }

@@ -74,7 +74,7 @@ contract SecretRelayGasTest is Test {
         // worst-case ERC20 entries: each pays a fresh resolver (zero -> nonzero token
         // balance and deposit credit)
         for (uint256 i; i < BATCH; ++i) {
-            bytes memory s = abi.encode("secret", i);
+            bytes memory s = abi.encode(keccak256(abi.encode("secret", i)));
             fillIds.push(_fill(address(uint160(0x5000 + i)), s));
             fillSecrets.push(s);
         }
@@ -211,7 +211,7 @@ contract SecretRelayGasTest is Test {
             bytes[] memory ss = new bytes[](n);
             for (uint256 i; i < n; ++i) {
                 ids[i] = keccak256(abi.encode("missing", i));
-                ss[i] = abi.encode("secret", i);
+                ss[i] = abi.encode(keccak256(abi.encode("secret", i)));
             }
             bytes memory data = _call(entryGas, ids, ss);
             _coolAll();
@@ -235,7 +235,7 @@ contract SecretRelayGasTest is Test {
     /// behind it settles with the normal, computed gas limit.
     function test_gasBurnerCannotStarveFollowingEntry() public {
         GasActor burner = new GasActor(1, 0);
-        bytes memory bs = "burner-secret";
+        bytes memory bs = abi.encode(keccak256("burner-secret"));
         bytes32 bad = _native(address(burner), bs);
 
         bytes32[] memory ids = new bytes32[](2);
@@ -274,7 +274,7 @@ contract SecretRelayGasTest is Test {
     function test_underGassedDeliveryNeverSwallowsEntries() public {
         // honest wallet whose receive() legitimately needs ~250k gas
         GasActor heavy = new GasActor(2, 250_000);
-        bytes memory hs = "heavy-secret";
+        bytes memory hs = abi.encode(keccak256("heavy-secret"));
         bytes32 id = _native(address(heavy), hs);
         bytes32[] memory ids = new bytes32[](1);
         bytes[] memory ss = new bytes[](1);
@@ -306,7 +306,7 @@ contract SecretRelayGasTest is Test {
         bytes32[] memory ids = new bytes32[](3);
         bytes[] memory ss = new bytes[](3);
         for (uint256 i; i < 3; ++i) {
-            ss[i] = abi.encode("heavy", i);
+            ss[i] = abi.encode(keccak256(abi.encode("heavy", i)));
             ids[i] = _native(address(new GasActor(2, 250_000)), ss[i]);
         }
         uint256 entryGas = 300_000;
