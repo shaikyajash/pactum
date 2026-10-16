@@ -259,7 +259,7 @@ contract PactumIntents is HashLock {
     {
         try IERC20Permit(token).permit(owner, address(this), p.value, p.deadline, p.v, p.r, p.s) {}
         catch {
-            if (IERC20Permit(token).allowance(owner, address(this)) < p.value) {
+            if (IERC20Permit(token).allowance(owner, address(this)) < needed) {
                 revert PermitFailed();
             }
         }
