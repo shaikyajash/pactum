@@ -256,6 +256,23 @@ impl Chain {
             .collect())
     }
 
+    /// Every escrow opened on this chain in `[from, to]`.
+    pub async fn locks_from(&self, from: u64, to: u64) -> anyhow::Result<Vec<Lock>> {
+        let logs = self.htlc().Initiated_filter().from_block(from).to_block(to).query().await?;
+        Ok(logs
+            .into_iter()
+            .map(|(e, _)| Lock {
+                swap_id: e.swapId,
+                initiator: e.initiator,
+                redeemer: e.redeemer,
+                token: e.token,
+                amount: e.amount,
+                secret_hash: e.secretHash,
+                expiry: e.expiry,
+            })
+            .collect())
+    }
+
     pub async fn fills_of(
         &self,
         order_hash: B256,

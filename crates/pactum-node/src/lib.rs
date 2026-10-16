@@ -5,8 +5,10 @@ pub mod chain;
 pub mod config;
 pub mod contracts;
 pub mod filler;
+pub mod keeper;
 pub mod maker;
 
 pub use chain::{Chain, ChainConfig, NATIVE};
 pub use filler::{Bid, IntentFiller, Job, JobStatus};
+pub use keeper::Keeper;
 pub use maker::{IntentRequest, Maker, OpenIntent};
