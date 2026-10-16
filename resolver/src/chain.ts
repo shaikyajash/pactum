@@ -11,7 +11,9 @@ import {
   type PublicClient,
   type WalletClient,
 } from "viem";
-import { hashLockAbi } from "./abi.js";
+import { parseEventLogs } from "viem";
+import { hashLockAbi, pactumIntentsAbi } from "./abi.js";
+import type { Order } from "./order.js";
 import { NATIVE, type SwapParams } from "./swap.js";
 
 export interface ChainConfig {
@@ -173,6 +175,58 @@ export class Chain {
     });
     for (const l of logs) out.set(l.args.swapId, l.args.secret);
     return out;
+  }
+
+  /** Fill a signed intent; returns the opened escrow and what the maker is owed. */
+  async fillOrder(
+    order: Order,
+    signature: Hex,
+    fillAmount: bigint,
+    secretIndex: number,
+    secretHash: Hex,
+    proof: Hex[],
+  ): Promise<{ swapId: Hex; owedDstAmount: bigint; expiry: bigint }> {
+    const hash = await this.wallet.writeContract({
+      chain: this.wallet.chain,
+      account: this.account,
+      address: this.contract,
+      abi: pactumIntentsAbi,
+      functionName: "fill",
+      args: [order, signature, fillAmount, BigInt(secretIndex), secretHash, proof],
+    });
+    const receipt = await this.public.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") throw new Error(`${this.name}: fill ${hash} reverted`);
+    const [filled] = parseEventLogs({
+      abi: pactumIntentsAbi,
+      eventName: "OrderFilled",
+      logs: receipt.logs,
+    });
+    if (!filled) throw new Error(`${this.name}: no OrderFilled in ${hash}`);
+    const s = await this.swap(filled.args.swapId);
+    return { swapId: filled.args.swapId, owedDstAmount: filled.args.owedDstAmount, expiry: s.expiry };
+  }
+
+  async filledEvents(fromBlock: bigint, toBlock: bigint, orderHash: Hex) {
+    const logs = await this.public.getContractEvents({
+      address: this.contract,
+      abi: pactumIntentsAbi,
+      eventName: "OrderFilled",
+      args: { orderHash },
+      fromBlock,
+      toBlock,
+      strict: true,
+    });
+    return logs.map((l) => l.args);
+  }
+
+  async orderProgress(orderHash: Hex): Promise<{ filled: bigint; nextIndex: number }> {
+    const [filled, nextIndex] = await this.public.readContract({
+      address: this.contract,
+      abi: pactumIntentsAbi,
+      functionName: "fills",
+      args: [orderHash],
+    });
+    return { filled, nextIndex };
   }
 
   private async confirm(hash: Hex): Promise<Hex> {
