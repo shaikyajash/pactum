@@ -323,3 +323,72 @@ async fn maker_rescues_counter_lock_the_resolver_abandons() {
     assert!(gained > parse_ether("0.249").unwrap(), "maker received its ETH (minus gas)");
     assert_eq!(env.nonce(&env.b, maker_addr).await, 1, "the rescue is the maker's only tx");
 }
+
+/// Cross-ecosystem: the maker sells USDC on an EVM chain for native SOL. The
+/// resolver opens an escrow in the Pactum Solana program, the maker verifies it
+/// on chain and releases the secret, and the resolver redeems the escrow *to
+/// the maker* before claiming the USDC. The maker pays no fees anywhere: its
+/// Solana account doesn't even exist until the SOL arrives.
+#[tokio::test]
+async fn usdc_on_evm_for_native_sol() {
+    let Some(env) = Env::setup().await else { return };
+    let Some(sol) = common::SolNode::start().await else { return };
+    let maker_addr = env.maker().address();
+
+    let resolver_key = pactum_sol::Keypair::generate();
+    sol.program.rpc.airdrop(&resolver_key.pubkey(), 10_000_000_000).await.unwrap();
+    let maker_key = pactum_sol::Keypair::generate();
+    let maker_sol = maker_key.pubkey();
+    assert_eq!(sol.program.rpc.balance(&maker_sol).await.unwrap(), 0);
+
+    let maker = Maker::to_solana(
+        Chain::connect(&env.cfg_a, env.maker()).unwrap(),
+        sol.leg(maker_key),
+        env.maker(),
+        env.relay.clone(),
+    );
+    let mut intent = maker
+        .open(
+            IntentRequest {
+                dst_token: alloy::primitives::B256::ZERO,       // native SOL
+                start_dst_amount: U256::from(2_000_000_000u64), // lamports
+                end_dst_amount: U256::from(1_500_000_000u64),
+                ..request(&env, 1)
+            },
+            U256::from(7),
+        )
+        .await
+        .unwrap();
+    assert_eq!(intent.order.receiver.0, maker_sol.0, "SOL is paid to the maker's ed25519 key");
+
+    let mut filler = IntentFiller::new(
+        env.chains(&env.resolver_a()),
+        env.relay.clone(),
+        pactum_node::filler::FixedRate {
+            rate_num: U256::from(1_600_000_000u64),
+            rate_den: thousand(),
+            max_fill_bps: 10_000,
+        },
+    )
+    .with_solana(sol.leg(resolver_key));
+
+    for _ in 0..15 {
+        filler.tick().await.unwrap();
+        maker.tick(&mut intent).await.unwrap();
+        filler.tick().await.unwrap();
+        if filler.jobs.first().is_some_and(|j| j.status == JobStatus::Settled) {
+            break;
+        }
+        advance(&env.a, 60).await;
+    }
+
+    let job = filler.jobs.first().expect("resolver filled");
+    assert_eq!(job.status, JobStatus::Settled);
+    assert!(job.sol.is_some(), "counter-lock was on Solana");
+    assert!(maker.is_complete(&intent).await.unwrap());
+
+    let got = sol.program.rpc.balance(&maker_sol).await.unwrap();
+    assert!((1_500_000_000..=1_600_000_000).contains(&got), "maker received {got} lamports");
+    assert_eq!(env.usdc_of(env.resolver_a().address()).await, thousand());
+    assert_eq!(env.nonce(&env.a, maker_addr).await, 0, "no EVM transaction either");
+}
