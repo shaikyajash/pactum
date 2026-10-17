@@ -14,6 +14,7 @@ path = "src/main.rs"
 pactum-core.workspace = true
 pactum-relay.workspace = true
 pactum-btc.workspace = true
+pactum-sol.workspace = true
 alloy = { workspace = true, features = ["full", "signer-local", "reqwest", "reqwest-rustls-tls"] }
 anyhow.workspace = true
 clap.workspace = true

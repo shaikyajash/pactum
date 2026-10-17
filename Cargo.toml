@@ -14,6 +14,7 @@ repository = "https://github.com/shaikyajash/pactum"
 pactum-core = { path = "crates/pactum-core" }
 pactum-relay = { path = "crates/pactum-relay" }
 pactum-btc = { path = "crates/pactum-btc" }
+pactum-sol = { path = "crates/pactum-sol" }
 alloy = { version = "2.5", default-features = false }
 anyhow = "1"
 axum = "0.8"

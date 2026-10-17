@@ -60,12 +60,16 @@ pub enum LockAnnouncement {
         /// absolute nLockTime of the refund leaf
         refund_after: u32,
     },
+    /// Escrow of the Pactum Solana program, at the PDA `["escrow", swap_id]`.
+    Solana { index: usize, swap_id: B256 },
 }
 
 impl LockAnnouncement {
     pub fn index(&self) -> usize {
         match self {
-            LockAnnouncement::Bitcoin { index, .. } => *index,
+            LockAnnouncement::Bitcoin { index, .. } | LockAnnouncement::Solana { index, .. } => {
+                *index
+            }
         }
     }
 }

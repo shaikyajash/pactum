@@ -8,6 +8,7 @@ pub mod contracts;
 pub mod filler;
 pub mod keeper;
 pub mod maker;
+pub mod sol;
 pub mod store;
 
 pub use chain::{Chain, ChainConfig, NATIVE};

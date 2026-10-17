@@ -147,7 +147,9 @@ impl BtcLeg {
         now: u64,
         min_window: u64,
     ) -> anyhow::Result<BtcLock> {
-        let LockAnnouncement::Bitcoin { txid, vout, refunder, refund_after, .. } = ann;
+        let LockAnnouncement::Bitcoin { txid, vout, refunder, refund_after, .. } = ann else {
+            bail!("not a Bitcoin lock");
+        };
         let htlc = Htlc {
             secret_hash: secret_hash.0,
             redeemer: self.x_only(),

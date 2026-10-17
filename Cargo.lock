@@ -3313,6 +3313,7 @@ dependencies = [
  "pactum-btc",
  "pactum-core",
  "pactum-relay",
+ "pactum-sol",
  "serde",
  "serde_json",
  "tokio",
