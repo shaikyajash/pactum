@@ -13,7 +13,7 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::{OpenOrder, SecretRelease, SignedOrder};
+use crate::{LockAnnouncement, OpenOrder, SecretRelease, SignedOrder};
 
 #[derive(Debug, Error)]
 pub enum RelayError {
@@ -42,6 +42,7 @@ impl IntoResponse for RelayError {
 struct Entry {
     signed: SignedOrder,
     secrets: HashMap<usize, Bytes>,
+    locks: Vec<LockAnnouncement>,
 }
 
 /// In-memory relay state. Cheap to clone; all clones share the same store.
@@ -64,7 +65,10 @@ impl Relay {
         if SecretTree::new(signed.secret_hashes.clone()).root() != signed.order.secretsRoot {
             return Err(RelayError::RootMismatch);
         }
-        self.orders.write().await.insert(hash, Entry { signed, secrets: HashMap::new() });
+        self.orders
+            .write()
+            .await
+            .insert(hash, Entry { signed, secrets: HashMap::new(), locks: Vec::new() });
         Ok(hash)
     }
 
@@ -89,6 +93,19 @@ impl Relay {
         }
         entry.secrets.insert(r.index, r.secret);
         Ok(())
+    }
+
+    pub async fn announce(&self, hash: B256, lock: LockAnnouncement) -> Result<(), RelayError> {
+        let mut orders = self.orders.write().await;
+        let entry = orders.get_mut(&hash).ok_or(RelayError::UnknownOrder)?;
+        if !entry.locks.contains(&lock) {
+            entry.locks.push(lock);
+        }
+        Ok(())
+    }
+
+    pub async fn locks(&self, hash: B256) -> Option<Vec<LockAnnouncement>> {
+        Some(self.orders.read().await.get(&hash)?.locks.clone())
     }
 
     pub async fn secret(&self, hash: B256, index: usize) -> Option<Bytes> {
@@ -130,10 +147,27 @@ async fn get_secret(
     }
 }
 
+async fn post_lock(
+    State(relay): State<Relay>,
+    Path(hash): Path<B256>,
+    Json(lock): Json<LockAnnouncement>,
+) -> Result<impl IntoResponse, RelayError> {
+    relay.announce(hash, lock).await?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn get_locks(State(relay): State<Relay>, Path(hash): Path<B256>) -> Response {
+    match relay.locks(hash).await {
+        Some(locks) => Json(locks).into_response(),
+        None => RelayError::UnknownOrder.into_response(),
+    }
+}
+
 pub fn router(relay: Relay) -> Router {
     Router::new()
         .route("/orders", post(post_order).get(list_orders))
         .route("/orders/{hash}/secrets", post(post_secret))
+        .route("/orders/{hash}/locks", post(post_lock).get(get_locks))
         .route("/orders/{hash}/secrets/{index}", get(get_secret))
         .with_state(relay)
 }

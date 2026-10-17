@@ -43,6 +43,33 @@ pub struct OpenOrder {
     pub signed: SignedOrder,
 }
 
+/// A resolver's counter-lock on a destination chain without EVM-style events
+/// the maker could scan for. Purely advisory: the maker re-derives the lock
+/// from these parameters and verifies it on-chain before releasing anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "chain", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum LockAnnouncement {
+    /// Taproot HTLC output funded by the resolver.
+    Bitcoin {
+        index: usize,
+        txid: String,
+        vout: u32,
+        value_sats: u64,
+        /// resolver's x-only refund key
+        refunder: B256,
+        /// absolute nLockTime of the refund leaf
+        refund_after: u32,
+    },
+}
+
+impl LockAnnouncement {
+    pub fn index(&self) -> usize {
+        match self {
+            LockAnnouncement::Bitcoin { index, .. } => *index,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecretRelease {
     pub index: usize,

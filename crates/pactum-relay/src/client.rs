@@ -2,7 +2,7 @@ use alloy::primitives::{B256, Bytes};
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
-use crate::{OpenOrder, SecretRelease, SignedOrder};
+use crate::{LockAnnouncement, OpenOrder, SecretRelease, SignedOrder};
 
 /// HTTP client for a relay.
 #[derive(Clone)]
@@ -46,6 +46,20 @@ impl RelayClient {
             bail!("relay rejected secret: {}", r.text().await?);
         }
         Ok(())
+    }
+
+    pub async fn announce(&self, hash: B256, lock: &LockAnnouncement) -> anyhow::Result<()> {
+        let url = format!("{}/orders/{hash}/locks", self.base);
+        let r = self.http.post(url).json(lock).send().await?;
+        if !r.status().is_success() {
+            bail!("relay rejected lock: {}", r.text().await?);
+        }
+        Ok(())
+    }
+
+    pub async fn locks(&self, hash: B256) -> anyhow::Result<Vec<LockAnnouncement>> {
+        let r = self.http.get(format!("{}/orders/{hash}/locks", self.base)).send().await?;
+        r.error_for_status()?.json().await.context("decoding locks")
     }
 
     pub async fn secret(&self, hash: B256, index: usize) -> anyhow::Result<Option<Bytes>> {

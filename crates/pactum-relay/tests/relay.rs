@@ -3,7 +3,7 @@ use alloy::{
     signers::{SignerSync, local::PrivateKeySigner},
 };
 use pactum_core::{Order, OrderSecrets};
-use pactum_relay::{Relay, RelayClient, SecretRelease, SignedOrder, router};
+use pactum_relay::{LockAnnouncement, Relay, RelayClient, SecretRelease, SignedOrder, router};
 
 async fn spawn() -> RelayClient {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -90,4 +90,25 @@ async fn rejects_uncommitted_secrets() {
     };
     assert!(relay.release(hash, &bogus).await.is_err());
     assert_eq!(relay.secret(hash, 1).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn lock_announcements_are_stored_once() {
+    let relay = spawn().await;
+    let maker = PrivateKeySigner::random();
+    let hash =
+        relay.post(&signed(&maker, maker.address(), &OrderSecrets::random(4))).await.unwrap();
+
+    let lock = LockAnnouncement::Bitcoin {
+        index: 2,
+        txid: "ab".repeat(32),
+        vout: 1,
+        value_sats: 50_000,
+        refunder: alloy::primitives::B256::repeat_byte(9),
+        refund_after: 1_900_000_000,
+    };
+    relay.announce(hash, &lock).await.unwrap();
+    relay.announce(hash, &lock).await.unwrap();
+    assert_eq!(relay.locks(hash).await.unwrap(), vec![lock]);
+    assert!(relay.locks(alloy::primitives::B256::ZERO).await.is_err(), "unknown order");
 }
