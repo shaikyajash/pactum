@@ -84,7 +84,9 @@ impl Node {
     }
 }
 
-fn htlc(refund_blocks: u16) -> (Htlc, Keypair, Keypair, [u8; 32]) {
+/// HTLC refundable at block `refund_height` (heights are easy to drive on regtest;
+/// production locks are Unix timestamps).
+fn htlc(refund_height: u32) -> (Htlc, Keypair, Keypair, [u8; 32]) {
     let secp = Secp256k1::new();
     let redeemer = Keypair::new(&secp, &mut thread_rng());
     let refunder = Keypair::new(&secp, &mut thread_rng());
@@ -93,7 +95,7 @@ fn htlc(refund_blocks: u16) -> (Htlc, Keypair, Keypair, [u8; 32]) {
         secret_hash: sha256::Hash::hash(&secret).to_byte_array(),
         redeemer: redeemer.x_only_public_key().0,
         refunder: refunder.x_only_public_key().0,
-        refund_blocks,
+        refund_after: bitcoin::absolute::LockTime::from_height(refund_height).unwrap(),
     };
     (h, redeemer, refunder, secret)
 }
@@ -101,15 +103,15 @@ fn htlc(refund_blocks: u16) -> (Htlc, Keypair, Keypair, [u8; 32]) {
 #[tokio::test]
 async fn redeem_with_secret_and_recover_it_from_the_chain() {
     let Some(node) = start().await else { return };
-    let (h, redeemer, refunder, secret) = htlc(10);
+    let (h, redeemer, refunder, secret) = htlc(10_000);
     let (funding, value) = node.fund(&h, 0.5).await;
     let fee = Amount::from_sat(1_000);
     let dest = node.new_address().await.script_pubkey();
 
-    // the refunder can't take it early: BIP-68 rejects the spend
+    // the refunder can't take it early: the lock height is far away
     let early = h.refund_tx(funding, value, dest.clone(), fee, &refunder).unwrap();
     let err = node.rpc.send_raw(&early).await.unwrap_err().to_string();
-    assert!(err.contains("non-BIP68-final"), "{err}");
+    assert!(err.contains("non-final"), "{err}");
 
     // the redeemer spends with the secret; Bitcoin Core validates the script path
     let tx = h.redeem_tx(funding, value, dest, fee, &secret, &redeemer).unwrap();
@@ -127,20 +129,21 @@ async fn redeem_with_secret_and_recover_it_from_the_chain() {
 }
 
 #[tokio::test]
-async fn refund_after_relative_timelock() {
+async fn refund_after_absolute_lock() {
     let Some(node) = start().await else { return };
-    let (h, _, refunder, _) = htlc(10);
-    let (funding, value) = node.fund(&h, 0.25).await;
+    // the chain is at height 101 after setup; lock until 112
+    let (h, _, refunder, _) = htlc(112);
+    let (funding, value) = node.fund(&h, 0.25).await; // mines block 102
     let fee = Amount::from_sat(1_000);
     let dest = node.new_address().await.script_pubkey();
     let refund = h.refund_tx(funding, value, dest, fee, &refunder).unwrap();
 
-    // funding has 1 confirmation; the leaf needs 10
-    node.mine(8).await;
+    // a tx with nLockTime = H is valid only in blocks after H
+    node.mine(9).await; // tip 111: next block is 112, still not > 112
     let err = node.rpc.send_raw(&refund).await.unwrap_err().to_string();
-    assert!(err.contains("non-BIP68-final"), "{err}");
+    assert!(err.contains("non-final"), "{err}");
 
-    node.mine(1).await;
+    node.mine(1).await; // tip 112: next block 113
     node.rpc.send_raw(&refund).await.unwrap();
     node.mine(1).await;
     let addr = h.address(&Secp256k1::new(), Network::Regtest).unwrap();
@@ -150,7 +153,7 @@ async fn refund_after_relative_timelock() {
 #[tokio::test]
 async fn wrong_key_cannot_redeem_even_with_the_secret() {
     let Some(node) = start().await else { return };
-    let (h, _, refunder, secret) = htlc(10);
+    let (h, _, refunder, secret) = htlc(10_000);
     let (funding, value) = node.fund(&h, 0.1).await;
     let dest = node.new_address().await.script_pubkey();
 

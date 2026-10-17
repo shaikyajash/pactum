@@ -7,8 +7,15 @@
 //! ```text
 //! redeem:  OP_SIZE 32 OP_EQUALVERIFY OP_SHA256 <secret_hash> OP_EQUALVERIFY
 //!          <redeemer> OP_CHECKSIG
-//! refund:  <blocks> OP_CHECKSEQUENCEVERIFY OP_DROP <refunder> OP_CHECKSIG
+//! refund:  <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <refunder> OP_CHECKSIG
 //! ```
+//!
+//! The refund lock is *absolute* and normally a Unix timestamp, so the Bitcoin
+//! leg expires on the same clock as the EVM leg it pairs with. A block-count
+//! lock would drift with block times: slow blocks could keep the BTC
+//! unrefundable after the EVM escrow expired, letting the redeemer take both
+//! legs. Bitcoin checks timestamps against median-time-past, which trails wall
+//! time by about an hour; see [`MTP_LAG_SECS`].
 //!
 //! The redeem leaf requires the redeemer's signature as well as the secret.
 //! Without it, anyone who saw the secret in the mempool could race the
@@ -21,7 +28,7 @@ use bitcoin::{
     absolute::LockTime,
     hashes::{Hash, sha256},
     key::{Keypair, Secp256k1},
-    opcodes::all::{OP_CHECKSIG, OP_CSV, OP_DROP, OP_EQUALVERIFY, OP_SHA256, OP_SIZE},
+    opcodes::all::{OP_CHECKSIG, OP_CLTV, OP_DROP, OP_EQUALVERIFY, OP_SHA256, OP_SIZE},
     script::Builder,
     secp256k1::{Message, Verification},
     sighash::{Prevouts, SighashCache, TapSighashType},
@@ -29,6 +36,10 @@ use bitcoin::{
     transaction::Version,
 };
 use thiserror::Error;
+
+/// Conservative bound on how far median-time-past trails wall-clock time.
+/// A timestamp refund lock `T` becomes spendable at roughly `T + MTP_LAG_SECS`.
+pub const MTP_LAG_SECS: u64 = 2 * 3600;
 
 /// BIP-341 NUMS point `H`: lift_x(sha256(G)). Nobody knows its discrete log.
 const NUMS: [u8; 32] = [
@@ -44,22 +55,23 @@ pub enum HtlcError {
     WrongSecret,
     #[error("fee {fee} leaves nothing to spend from {value}")]
     FeeTooHigh { fee: Amount, value: Amount },
-    #[error("refund delay must be 1..=65535 blocks")]
+    #[error("refund lock must be non-zero")]
     BadDelay,
     #[error("taproot: {0}")]
     Taproot(String),
 }
 
 /// Parameters fully determining an HTLC output.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Htlc {
     pub secret_hash: [u8; 32],
     /// Can spend with the secret.
     pub redeemer: XOnlyPublicKey,
-    /// Can spend after `refund_blocks` confirmations of the funding output.
+    /// Can spend once `refund_after` has passed.
     pub refunder: XOnlyPublicKey,
-    /// Relative timelock (BIP-68 blocks) on the refund leaf.
-    pub refund_blocks: u16,
+    /// Absolute lock on the refund leaf: a Unix timestamp in production, a
+    /// block height in tests.
+    pub refund_after: LockTime,
 }
 
 impl Htlc {
@@ -78,8 +90,8 @@ impl Htlc {
 
     pub fn refund_script(&self) -> ScriptBuf {
         Builder::new()
-            .push_int(self.refund_blocks as i64)
-            .push_opcode(OP_CSV)
+            .push_int(self.refund_after.to_consensus_u32() as i64)
+            .push_opcode(OP_CLTV)
             .push_opcode(OP_DROP)
             .push_x_only_key(&self.refunder)
             .push_opcode(OP_CHECKSIG)
@@ -90,7 +102,7 @@ impl Htlc {
         &self,
         secp: &Secp256k1<C>,
     ) -> Result<TaprootSpendInfo, HtlcError> {
-        if self.refund_blocks == 0 {
+        if self.refund_after == LockTime::ZERO {
             return Err(HtlcError::BadDelay);
         }
         let nums = XOnlyPublicKey::from_slice(&NUMS).expect("valid NUMS point");
@@ -134,19 +146,12 @@ impl Htlc {
             return Err(HtlcError::WrongSecret);
         }
         let script = self.redeem_script();
-        self.spend(
-            funding,
-            value,
-            to,
-            fee,
-            Sequence::ENABLE_RBF_NO_LOCKTIME,
-            script,
-            redeemer,
-            |sig| vec![sig, secret.to_vec()],
-        )
+        self.spend(funding, value, to, fee, LockTime::ZERO, script, redeemer, |sig| {
+            vec![sig, secret.to_vec()]
+        })
     }
 
-    /// Spend the HTLC back to `to` after the relative timelock, signed by the refunder.
+    /// Spend the HTLC back to `to` once `refund_after` has passed, signed by the refunder.
     pub fn refund_tx(
         &self,
         funding: OutPoint,
@@ -156,8 +161,7 @@ impl Htlc {
         refunder: &Keypair,
     ) -> Result<Transaction, HtlcError> {
         let script = self.refund_script();
-        let sequence = Sequence::from_height(self.refund_blocks);
-        self.spend(funding, value, to, fee, sequence, script, refunder, |sig| vec![sig])
+        self.spend(funding, value, to, fee, self.refund_after, script, refunder, |sig| vec![sig])
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -167,7 +171,7 @@ impl Htlc {
         value: Amount,
         to: ScriptBuf,
         fee: Amount,
-        sequence: Sequence,
+        lock_time: LockTime,
         leaf: ScriptBuf,
         key: &Keypair,
         stack: impl FnOnce(Vec<u8>) -> Vec<Vec<u8>>,
@@ -180,9 +184,14 @@ impl Htlc {
             TxOut { value, script_pubkey: ScriptBuf::new_p2tr_tweaked(info.output_key()) };
 
         let mut tx = Transaction {
-            version: Version::TWO, // required for BIP-68 relative locktimes
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn { previous_output: funding, sequence, ..Default::default() }],
+            version: Version::TWO,
+            lock_time,
+            // a non-final sequence makes nLockTime (and so OP_CLTV) enforceable
+            input: vec![TxIn {
+                previous_output: funding,
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                ..Default::default()
+            }],
             output: vec![TxOut { value: out, script_pubkey: to }],
         };
 
@@ -243,7 +252,7 @@ mod tests {
             secret_hash: sha256::Hash::hash(&secret).to_byte_array(),
             redeemer: redeemer.x_only_public_key().0,
             refunder: refunder.x_only_public_key().0,
-            refund_blocks: 144,
+            refund_after: LockTime::from_time(1_900_000_000).unwrap(),
         };
         (htlc, redeemer, refunder, secret)
     }
@@ -271,7 +280,7 @@ mod tests {
         assert!(asm.starts_with("OP_SIZE OP_PUSHBYTES_1 20 OP_EQUALVERIFY OP_SHA256"), "{asm}");
         assert!(asm.ends_with("OP_CHECKSIG"));
         let asm = h.refund_script().to_asm_string();
-        assert!(asm.contains("OP_CSV OP_DROP"), "{asm}");
+        assert!(asm.contains("OP_CLTV OP_DROP"), "{asm}");
     }
 
     #[test]
@@ -281,7 +290,7 @@ mod tests {
         let a = h.address(&secp, Network::Regtest).unwrap();
         assert_eq!(a, h.address(&secp, Network::Regtest).unwrap());
         assert!(a.to_string().starts_with("bcrt1p"));
-        let other = Htlc { refund_blocks: 145, ..h };
+        let other = Htlc { refund_after: LockTime::from_time(1_900_000_001).unwrap(), ..h };
         assert_ne!(a, other.address(&secp, Network::Regtest).unwrap());
     }
 
@@ -313,7 +322,8 @@ mod tests {
 
         // a refund reveals nothing
         let refund = h.refund_tx(funding(), v, to, fee, &refunder).unwrap();
-        assert_eq!(refund.input[0].sequence, Sequence::from_height(144));
+        assert_eq!(refund.lock_time, LockTime::from_time(1_900_000_000).unwrap());
+        assert!(refund.input[0].sequence.enables_absolute_lock_time());
         assert_eq!(h.extract_secret(&refund, funding()), None);
     }
 
