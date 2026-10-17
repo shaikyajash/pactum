@@ -5,6 +5,7 @@
 //! selection and swap ids. Nothing in this crate does I/O.
 
 pub mod auction;
+pub mod chains;
 pub mod merkle;
 pub mod order;
 pub mod permit;

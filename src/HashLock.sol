@@ -24,6 +24,7 @@ contract HashLock {
     /// @notice Share of a deposit paid to whoever calls `refund` on an expired swap,
     ///         in basis points. The rest goes to the swap's initiator.
     uint256 public constant KEEPER_TIP_BPS = 1_000;
+    uint256 public constant SECRET_LENGTH = 32;
 
     struct Swap {
         address initiator;
@@ -137,9 +138,14 @@ contract HashLock {
 
     /// @notice Release funds to the redeemer by revealing the secret.
     /// @dev Callable by anyone so a relayer can settle on the redeemer's behalf.
+    /// @dev Secrets must be exactly 32 bytes. Bitcoin HTLC scripts enforce
+    ///      `OP_SIZE 32`, so a longer preimage could unlock this leg while the
+    ///      counter-leg on Bitcoin stays locked forever. Same rule on every chain.
     function redeem(bytes32 swapId, bytes calldata secret) external {
         Swap storage s = _live(swapId);
-        if (sha256(secret) != s.secretHash) revert InvalidSecret();
+        if (secret.length != SECRET_LENGTH || sha256(secret) != s.secretHash) {
+            revert InvalidSecret();
+        }
 
         s.settled = true;
         emit Redeemed(swapId, s.secretHash, secret);

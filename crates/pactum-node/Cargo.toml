@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 pactum-core.workspace = true
 pactum-relay.workspace = true
+pactum-btc.workspace = true
+pactum-sol.workspace = true
 alloy = { workspace = true, features = ["full", "signer-local", "reqwest", "reqwest-rustls-tls"] }
 anyhow.workspace = true
 clap.workspace = true
@@ -23,5 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+pactum-btc.workspace = true
+pactum-sol.workspace = true
 axum.workspace = true
 alloy = { workspace = true, features = ["node-bindings"] }

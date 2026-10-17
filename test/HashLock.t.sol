@@ -118,6 +118,24 @@ contract HashLockTest is Test {
         htlc.redeem(id, "wrong");
     }
 
+    /// A preimage of the wrong length must fail even when its hash matches:
+    /// Bitcoin legs enforce OP_SIZE 32, so accepting it here could unlock this
+    /// leg while the Bitcoin leg stays locked forever.
+    function test_redeem_rejectsNon32ByteSecretEvenIfHashMatches() public {
+        bytes memory long = abi.encodePacked(bytes32(uint256(7)), bytes1(0x01)); // 33 bytes
+        vm.prank(alice);
+        bytes32 id =
+            htlc.initiate{value: 1 ether}(bob, address(0), 1 ether, sha256(long), expiry, "long");
+        vm.expectRevert(HashLock.InvalidSecret.selector);
+        htlc.redeem(id, long);
+
+        bytes memory short = hex"deadbeef";
+        vm.prank(alice);
+        id = htlc.initiate{value: 1 ether}(bob, address(0), 1 ether, sha256(short), expiry, "short");
+        vm.expectRevert(HashLock.InvalidSecret.selector);
+        htlc.redeem(id, short);
+    }
+
     function test_redeem_revertsTwice() public {
         bytes32 id = _initiate(1 ether);
         htlc.redeem(id, secret);

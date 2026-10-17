@@ -179,3 +179,141 @@ impl Env {
         ProviderBuilder::new().connect_http(anvil.endpoint_url()).get_balance(who).await.unwrap()
     }
 }
+
+// ------------------------------------------------------------------ bitcoin
+
+use pactum_btc::BitcoinRpc;
+use pactum_node::btc::bitcoin::{
+    key::{Keypair, Secp256k1},
+    secp256k1::rand::thread_rng,
+};
+
+/// A regtest bitcoind in Docker, stopped on drop.
+pub struct BtcNode {
+    id: String,
+    pub rpc: BitcoinRpc,
+}
+
+impl Drop for BtcNode {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["stop", &self.id]).output();
+    }
+}
+
+impl BtcNode {
+    pub async fn start() -> Option<Self> {
+        if !Command::new("docker").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("skipping: docker not available");
+            return None;
+        }
+        let out = Command::new("docker")
+            .args(["run", "-d", "--rm", "-p", "127.0.0.1::18443", "bitcoin/bitcoin:28.1"])
+            .args(["-regtest", "-server", "-rpcuser=pactum", "-rpcpassword=pactum"])
+            .args(["-rpcbind=0.0.0.0", "-rpcallowip=0.0.0.0/0", "-fallbackfee=0.0002"])
+            .arg("-txindex=1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "docker run failed");
+        let id = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        let port = String::from_utf8(
+            Command::new("docker").args(["port", &id, "18443"]).output().unwrap().stdout,
+        )
+        .unwrap();
+        let port = port.lines().next().unwrap().rsplit(':').next().unwrap().to_owned();
+        let rpc = BitcoinRpc::new(format!("http://127.0.0.1:{port}"), "pactum", "pactum");
+        for _ in 0..60 {
+            if rpc.block_count().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Some(Self { id, rpc })
+    }
+
+    /// Create a wallet and return a leg using it with a fresh key.
+    pub async fn leg(&self, wallet: &str) -> pactum_node::btc::BtcLeg {
+        let _: serde_json::Value =
+            self.rpc.call("createwallet", serde_json::json!([wallet])).await.unwrap();
+        pactum_node::btc::BtcLeg {
+            network: pactum_core::chains::BitcoinNetwork::Regtest,
+            rpc: self.rpc.clone(),
+            wallet: self.rpc.wallet(wallet),
+            key: Keypair::new(&Secp256k1::new(), &mut thread_rng()),
+            min_confirmations: 1,
+        }
+    }
+
+    pub async fn mine_to(&self, wallet: &BitcoinRpc, n: u64) {
+        let addr: String =
+            wallet.call("getnewaddress", serde_json::json!(["", "bech32m"])).await.unwrap();
+        let _: serde_json::Value =
+            self.rpc.call("generatetoaddress", serde_json::json!([n, addr])).await.unwrap();
+    }
+
+    pub async fn balance_sats(&self, wallet: &BitcoinRpc) -> u64 {
+        let b: f64 = wallet.call("getbalance", serde_json::json!([])).await.unwrap();
+        pactum_node::btc::bitcoin::Amount::from_btc(b).unwrap().to_sat()
+    }
+}
+
+// ------------------------------------------------------------------- solana
+
+use pactum_sol::{HtlcProgram, Keypair as SolKeypair, SolanaRpc};
+
+/// solana-test-validator in Docker with the Pactum program preloaded.
+pub struct SolNode {
+    id: String,
+    pub program: HtlcProgram,
+}
+
+impl Drop for SolNode {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["stop", &self.id]).output();
+    }
+}
+
+impl SolNode {
+    pub async fn start() -> Option<Self> {
+        let deploy = repo_root().join("programs/pactum-solana/target/deploy");
+        if !deploy.join("pactum_solana.so").exists()
+            || !Command::new("docker").arg("version").output().is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: needs docker and the cargo-build-sbf output");
+            return None;
+        }
+        let program_id = SolKeypair::from_seed([0x50; 32]).pubkey();
+        let out = Command::new("docker")
+            .args(["run", "-d", "--rm", "--platform", "linux/amd64", "--entrypoint", "sh"])
+            .args(["-p", "127.0.0.1::8899", "-v"])
+            .arg(format!("{}:/prog:ro", deploy.display()))
+            .args(["pactum-solana:dev", "-c"])
+            .arg(format!(
+                "solana-test-validator --reset --quiet --ledger /tmp/l --bpf-program {program_id} /prog/pactum_solana.so"
+            ))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "docker run failed");
+        let id = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        let port = String::from_utf8(
+            Command::new("docker").args(["port", &id, "8899"]).output().unwrap().stdout,
+        )
+        .unwrap();
+        let port = port.lines().next().unwrap().rsplit(':').next().unwrap().to_owned();
+        let rpc = SolanaRpc::new(format!("http://127.0.0.1:{port}"));
+        for _ in 0..120 {
+            if rpc.latest_blockhash().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Some(Self { id, program: HtlcProgram { id: program_id, rpc } })
+    }
+
+    pub fn leg(&self, key: SolKeypair) -> pactum_node::sol::SolLeg {
+        pactum_node::sol::SolLeg {
+            cluster: pactum_core::chains::SolanaCluster::Localnet,
+            program: self.program.clone(),
+            key,
+        }
+    }
+}

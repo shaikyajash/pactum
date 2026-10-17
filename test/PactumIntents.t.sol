@@ -34,7 +34,7 @@ contract PactumIntentsTest is Test {
         usdc.approve(address(intents), type(uint256).max);
 
         for (uint256 i; i <= PARTS; ++i) {
-            secrets.push(abi.encode("maker secret", i));
+            secrets.push(abi.encode(keccak256(abi.encode("maker secret", i))));
             hashes.push(sha256(secrets[i]));
         }
     }
@@ -57,11 +57,11 @@ contract PactumIntentsTest is Test {
         }
         o = PactumIntents.Order({
             maker: maker,
-            receiver: maker,
+            receiver: bytes32(uint256(uint160(maker))),
             srcToken: address(usdc),
             srcAmount: SRC,
             dstChainId: 8453,
-            dstToken: address(0),
+            dstToken: bytes32(0),
             startDstAmount: 0.05 ether,
             endDstAmount: 0.03 ether,
             auctionStart: uint64(block.timestamp),
@@ -155,7 +155,7 @@ contract PactumIntentsTest is Test {
 
         PactumIntents.Order memory o = _order(1);
         o.maker = address(wallet);
-        o.receiver = address(wallet);
+        o.receiver = bytes32(uint256(uint160(address(wallet))));
         bytes32[] memory proof = new bytes32[](0);
 
         vm.prank(resolverA);

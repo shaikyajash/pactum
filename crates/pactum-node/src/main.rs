@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{Address, B256, U256},
     signers::local::PrivateKeySigner,
 };
 use anyhow::Context;
@@ -87,9 +87,10 @@ enum Cmd {
         /// Source amount, in base units.
         #[arg(long)]
         sell_amount: U256,
-        /// Destination token; omit for the native asset.
-        #[arg(long, default_value_t = Address::ZERO)]
-        buy_token: Address,
+        /// Destination token: a 0x EVM address or a 32-byte word (Solana mint);
+        /// omit for the native asset.
+        #[arg(long, value_parser = parse_word, default_value = "0x0000000000000000000000000000000000000000")]
+        buy_token: B256,
         /// Opening ask for the whole order, in destination base units.
         #[arg(long)]
         start: U256,
@@ -105,8 +106,10 @@ enum Cmd {
         /// Number of parts the order may be split into.
         #[arg(long, default_value_t = 1)]
         parts: u16,
-        #[arg(long)]
-        receiver: Option<Address>,
+        /// Destination recipient: a 0x EVM address or a 32-byte word (Solana
+        /// pubkey, Bitcoin x-only key). Defaults to the maker's EVM address.
+        #[arg(long, value_parser = parse_word)]
+        receiver: Option<B256>,
         /// Native deposit (wei) each fill must post as a keeper incentive.
         #[arg(long, default_value_t = U256::ZERO)]
         min_deposit: U256,
@@ -119,6 +122,15 @@ enum Cmd {
         #[arg(long)]
         state: Option<PathBuf>,
     },
+}
+
+/// Accept a 20-byte EVM address (left-padded) or a raw 32-byte word.
+fn parse_word(s: &str) -> Result<B256, String> {
+    match s.trim_start_matches("0x").len() {
+        40 => s.parse::<Address>().map(|a| a.into_word()).map_err(|e| e.to_string()),
+        64 => s.parse::<B256>().map_err(|e| e.to_string()),
+        _ => Err("expected a 20-byte address or a 32-byte hex word".into()),
+    }
 }
 
 #[tokio::main]
