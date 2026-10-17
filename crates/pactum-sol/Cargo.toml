@@ -1,0 +1,20 @@
+[package]
+name = "pactum-sol"
+description = "Minimal Solana client for the Pactum HTLC program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+bs58 = "0.5"
+curve25519-dalek = "4"
+ed25519-dalek = "2"
+getrandom = "0.2"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
