@@ -179,3 +179,79 @@ impl Env {
         ProviderBuilder::new().connect_http(anvil.endpoint_url()).get_balance(who).await.unwrap()
     }
 }
+
+// ------------------------------------------------------------------ bitcoin
+
+use pactum_btc::BitcoinRpc;
+use pactum_node::btc::bitcoin::{
+    key::{Keypair, Secp256k1},
+    secp256k1::rand::thread_rng,
+};
+
+/// A regtest bitcoind in Docker, stopped on drop.
+pub struct BtcNode {
+    id: String,
+    pub rpc: BitcoinRpc,
+}
+
+impl Drop for BtcNode {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["stop", &self.id]).output();
+    }
+}
+
+impl BtcNode {
+    pub async fn start() -> Option<Self> {
+        if !Command::new("docker").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("skipping: docker not available");
+            return None;
+        }
+        let out = Command::new("docker")
+            .args(["run", "-d", "--rm", "-p", "127.0.0.1::18443", "bitcoin/bitcoin:28.1"])
+            .args(["-regtest", "-server", "-rpcuser=pactum", "-rpcpassword=pactum"])
+            .args(["-rpcbind=0.0.0.0", "-rpcallowip=0.0.0.0/0", "-fallbackfee=0.0002"])
+            .arg("-txindex=1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "docker run failed");
+        let id = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        let port = String::from_utf8(
+            Command::new("docker").args(["port", &id, "18443"]).output().unwrap().stdout,
+        )
+        .unwrap();
+        let port = port.lines().next().unwrap().rsplit(':').next().unwrap().to_owned();
+        let rpc = BitcoinRpc::new(format!("http://127.0.0.1:{port}"), "pactum", "pactum");
+        for _ in 0..60 {
+            if rpc.block_count().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Some(Self { id, rpc })
+    }
+
+    /// Create a wallet and return a leg using it with a fresh key.
+    pub async fn leg(&self, wallet: &str) -> pactum_node::btc::BtcLeg {
+        let _: serde_json::Value =
+            self.rpc.call("createwallet", serde_json::json!([wallet])).await.unwrap();
+        pactum_node::btc::BtcLeg {
+            network: pactum_core::chains::BitcoinNetwork::Regtest,
+            rpc: self.rpc.clone(),
+            wallet: self.rpc.wallet(wallet),
+            key: Keypair::new(&Secp256k1::new(), &mut thread_rng()),
+            min_confirmations: 1,
+        }
+    }
+
+    pub async fn mine_to(&self, wallet: &BitcoinRpc, n: u64) {
+        let addr: String =
+            wallet.call("getnewaddress", serde_json::json!(["", "bech32m"])).await.unwrap();
+        let _: serde_json::Value =
+            self.rpc.call("generatetoaddress", serde_json::json!([n, addr])).await.unwrap();
+    }
+
+    pub async fn balance_sats(&self, wallet: &BitcoinRpc) -> u64 {
+        let b: f64 = wallet.call("getbalance", serde_json::json!([])).await.unwrap();
+        pactum_node::btc::bitcoin::Amount::from_btc(b).unwrap().to_sat()
+    }
+}

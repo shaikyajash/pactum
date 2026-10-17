@@ -151,10 +151,10 @@ impl BitcoinRpc {
         }
         let mempool: Vec<Txid> = self.call("getrawmempool", json!([])).await?;
         for txid in mempool {
-            if let Ok(tx) = self.raw_tx(txid).await {
-                if spends(&tx) {
-                    return Ok(Some(tx));
-                }
+            if let Ok(tx) = self.raw_tx(txid).await
+                && spends(&tx)
+            {
+                return Ok(Some(tx));
             }
         }
         Ok(None)

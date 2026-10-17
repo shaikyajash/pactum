@@ -177,3 +177,80 @@ async fn resolver_resumes_after_restart() {
 
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Cross-ecosystem: the maker sells USDC on an EVM chain for native BTC on
+/// Bitcoin (regtest). The resolver fills on EVM and funds a Taproot HTLC; the
+/// maker verifies it on chain and claims it, revealing the secret on Bitcoin;
+/// the resolver reads the secret from Bitcoin and claims the USDC.
+#[tokio::test]
+async fn usdc_on_evm_for_native_btc() {
+    let Some(env) = Env::setup().await else { return };
+    let Some(btc) = common::BtcNode::start().await else { return };
+    let maker_addr = env.maker().address();
+
+    let resolver_leg = btc.leg("resolver").await;
+    let maker_leg = btc.leg("maker").await;
+    btc.mine_to(&resolver_leg.wallet, 101).await; // mature coinbase for the resolver
+
+    let maker = Maker::to_bitcoin(
+        Chain::connect(&env.cfg_a, env.maker()).unwrap(),
+        maker_leg.clone(),
+        env.maker(),
+        env.relay.clone(),
+    );
+    let mut intent = maker
+        .open(
+            IntentRequest {
+                dst_token: alloy::primitives::B256::ZERO,   // native BTC
+                start_dst_amount: U256::from(2_000_000u64), // sats
+                end_dst_amount: U256::from(1_500_000u64),
+                parts: 1,
+                ..request(&env, 1)
+            },
+            U256::from(4),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        intent.order.dstChainId,
+        pactum_core::chains::ChainKind::Bitcoin(pactum_core::chains::BitcoinNetwork::Regtest)
+            .chain_id()
+    );
+
+    // resolver pays 1.6M sats per 1000 USDC
+    let mut filler = IntentFiller::new(
+        env.chains(&env.resolver_a()),
+        env.relay.clone(),
+        pactum_node::filler::FixedRate {
+            rate_num: U256::from(1_600_000u64),
+            rate_den: thousand(),
+            max_fill_bps: 10_000,
+        },
+    )
+    .with_bitcoin(resolver_leg.clone());
+
+    let maker_btc_before = btc.balance_sats(&maker_leg.wallet).await;
+    for _ in 0..15 {
+        filler.tick().await.unwrap();
+        btc.mine_to(&resolver_leg.wallet, 1).await; // confirm any funding / claim
+        maker.tick(&mut intent).await.unwrap();
+        btc.mine_to(&resolver_leg.wallet, 1).await;
+        filler.tick().await.unwrap();
+        if filler.jobs.first().is_some_and(|j| j.status == JobStatus::Settled) {
+            break;
+        }
+        advance(&env.a, 60).await;
+    }
+
+    let job = filler.jobs.first().expect("resolver filled");
+    assert_eq!(job.status, JobStatus::Settled);
+    assert!(job.btc.is_some(), "counter-lock was on Bitcoin");
+    assert!(maker.is_complete(&intent).await.unwrap());
+
+    // maker got the BTC (minus the claim fee), resolver got the USDC
+    let got = btc.balance_sats(&maker_leg.wallet).await - maker_btc_before;
+    assert!((1_500_000..=1_600_000).contains(&(got + 2_000)), "maker received {got} sats");
+    assert_eq!(env.usdc_of(env.resolver_a().address()).await, thousand());
+    // and never sent an EVM transaction
+    assert_eq!(env.nonce(&env.a, maker_addr).await, 0);
+}
