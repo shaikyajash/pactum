@@ -35,5 +35,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # the e2e test runs `forge build` itself and spins up two anvil chains
+      # regtest bitcoind for the Bitcoin HTLC and EVM->BTC e2e tests
+      - run: docker pull bitcoin/bitcoin:28.1
+      # EVM e2e (anvil), Bitcoin regtest; Solana tests skip without the SBF build
       - run: cargo test --workspace
+
+  solana:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Solana toolchain image
+        run: docker build -t pactum-solana:dev -f docker/solana.Dockerfile docker
+      - name: Program unit tests and SBF build
+        run: |
+          docker run --rm --entrypoint sh -v "$PWD/programs/pactum-solana":/work -w /work \
+            pactum-solana:dev -c 'cargo test && cargo-build-sbf --sbf-out-dir /work/target/deploy'
+          sudo chown -R "$USER" programs/pactum-solana/target
+      - name: Program on solana-test-validator, and the EVM->SOL e2e
+        run: |
+          cargo test -p pactum-sol --test validator
+          cargo test -p pactum-node --test e2e usdc_on_evm_for_native_sol
