@@ -86,7 +86,10 @@ impl Htlc {
             .into_script()
     }
 
-    pub fn spend_info<C: Verification>(&self, secp: &Secp256k1<C>) -> Result<TaprootSpendInfo, HtlcError> {
+    pub fn spend_info<C: Verification>(
+        &self,
+        secp: &Secp256k1<C>,
+    ) -> Result<TaprootSpendInfo, HtlcError> {
         if self.refund_blocks == 0 {
             return Err(HtlcError::BadDelay);
         }
@@ -99,11 +102,18 @@ impl Htlc {
             .map_err(|_| HtlcError::Taproot("unfinalizable tree".into()))
     }
 
-    pub fn script_pubkey<C: Verification>(&self, secp: &Secp256k1<C>) -> Result<ScriptBuf, HtlcError> {
+    pub fn script_pubkey<C: Verification>(
+        &self,
+        secp: &Secp256k1<C>,
+    ) -> Result<ScriptBuf, HtlcError> {
         Ok(ScriptBuf::new_p2tr_tweaked(self.spend_info(secp)?.output_key()))
     }
 
-    pub fn address<C: Verification>(&self, secp: &Secp256k1<C>, network: Network) -> Result<Address, HtlcError> {
+    pub fn address<C: Verification>(
+        &self,
+        secp: &Secp256k1<C>,
+        network: Network,
+    ) -> Result<Address, HtlcError> {
         Ok(Address::p2tr_tweaked(self.spend_info(secp)?.output_key(), network))
     }
 
@@ -124,9 +134,16 @@ impl Htlc {
             return Err(HtlcError::WrongSecret);
         }
         let script = self.redeem_script();
-        self.spend(funding, value, to, fee, Sequence::ENABLE_RBF_NO_LOCKTIME, script, redeemer, |sig| {
-            vec![sig, secret.to_vec()]
-        })
+        self.spend(
+            funding,
+            value,
+            to,
+            fee,
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+            script,
+            redeemer,
+            |sig| vec![sig, secret.to_vec()],
+        )
     }
 
     /// Spend the HTLC back to `to` after the relative timelock, signed by the refunder.
@@ -159,7 +176,8 @@ impl Htlc {
         let out = out.ok_or(HtlcError::FeeTooHigh { fee, value })?;
         let secp = Secp256k1::new();
         let info = self.spend_info(&secp)?;
-        let prevout = TxOut { value, script_pubkey: ScriptBuf::new_p2tr_tweaked(info.output_key()) };
+        let prevout =
+            TxOut { value, script_pubkey: ScriptBuf::new_p2tr_tweaked(info.output_key()) };
 
         let mut tx = Transaction {
             version: Version::TWO, // required for BIP-68 relative locktimes

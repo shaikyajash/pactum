@@ -40,7 +40,11 @@ impl BitcoinRpc {
         Self { url: format!("{}/wallet/{name}", self.url.trim_end_matches('/')), ..self.clone() }
     }
 
-    pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> anyhow::Result<T> {
         let body = json!({ "jsonrpc": "1.0", "id": "pactum", "method": method, "params": params });
         let resp: Response<T> = self
             .http
@@ -74,7 +78,9 @@ impl BitcoinRpc {
             .as_array()
             .context("getblock: no tx array")?
             .iter()
-            .map(|t| deserialize_hex(t["hex"].as_str().context("tx without hex")?).map_err(Into::into))
+            .map(|t| {
+                deserialize_hex(t["hex"].as_str().context("tx without hex")?).map_err(Into::into)
+            })
             .collect()
     }
 
