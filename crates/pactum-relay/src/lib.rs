@@ -12,7 +12,7 @@ pub use client::RelayClient;
 pub use server::{Relay, router, serve};
 
 use alloy::primitives::{Address, B256, Bytes};
-use pactum_core::Order;
+use pactum_core::{Order, permit::SignedPermit};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,6 +24,9 @@ pub struct SignedOrder {
     pub contract: Address,
     /// Public leaf hashes so resolvers can build proofs. Secrets stay with the maker.
     pub secret_hashes: Vec<B256>,
+    /// EIP-2612 permit for `srcToken`, so the maker never sends an approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit: Option<SignedPermit>,
 }
 
 impl SignedOrder {

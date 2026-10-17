@@ -3,7 +3,7 @@ pragma solidity 0.8.24;
 
 import {HashLock} from "./HashLock.sol";
 import {MerkleSecrets} from "./lib/MerkleSecrets.sol";
-import {SafeTransfer} from "./lib/SafeTransfer.sol";
+import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 
 /// @title PactumIntents
 /// @notice Gasless, partially fillable cross-chain swap intents settled by HTLCs.
@@ -33,9 +33,20 @@ import {SafeTransfer} from "./lib/SafeTransfer.sol";
 ///                         76..99 -> 3         100    -> 4
 ///
 ///      With `parts == 1` the order must be filled in one go with secret 0.
+///
+///      Safety deposits: each fill posts `msg.value >= minDeposit` (see
+///      `HashLock.deposits`). Redeeming credits it back to the resolver; an expired
+///      fill refunded by anyone pays the caller a `KEEPER_TIP_BPS` tip and credits
+///      the rest to the maker, so filling and abandoning an order costs a griefer
+///      90% of its deposit. This path deliberately favours makers: resolvers are
+///      expected to avoid makers who withhold the secret after a valid counter-lock.
+///
+///      Refunds never roll back `fills[].filled` or `nextIndex`: the secret of a
+///      refunded fill may already have leaked, so its index must stay spent. A maker
+///      whose order was griefed this way must re-sign a fresh order with a NEW
+///      `secretsRoot`, and must never reuse a `secretsRoot` (or its secrets) across
+///      orders.
 contract PactumIntents is HashLock {
-    using SafeTransfer for address;
-
     struct Order {
         address maker;
         address receiver;
@@ -52,17 +63,18 @@ contract PactumIntents is HashLock {
         uint16 parts;
         bytes32 secretsRoot;
         uint256 nonce;
+        /// native deposit each fill must post; see HashLock.deposits
+        uint256 minDeposit;
     }
 
     bytes32 public constant ORDER_TYPEHASH = keccak256(
         "Order(address maker,address receiver,address srcToken,uint256 srcAmount,"
         "uint256 dstChainId,address dstToken,uint256 startDstAmount,uint256 endDstAmount,"
         "uint64 auctionStart,uint64 auctionEnd,uint64 deadline,uint64 srcLock,uint16 parts,"
-        "bytes32 secretsRoot,uint256 nonce)"
+        "bytes32 secretsRoot,uint256 nonce,uint256 minDeposit)"
     );
 
     uint16 public constant MAX_PARTS = 1024;
-    bytes4 private constant _ERC1271_MAGIC = 0x1626ba7e;
 
     struct Fill {
         uint256 filled;
@@ -91,10 +103,25 @@ contract PactumIntents is HashLock {
     error InvalidProof();
     error NotMaker();
     error PartialFillNotAllowed();
+    error PermitFailed();
+    error DepositTooLow();
+
+    /// @dev EIP-2612 approval signed by the maker for `srcToken`.
+    struct Permit {
+        uint256 value;
+        uint256 deadline;
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+    }
 
     // ------------------------------------------------------------------ fill
 
     /// @notice Fill `fillAmount` of a signed order.
+    /// @dev The maker's signature (ECDSA or EIP-1271) is checked only on the first
+    ///      fill of an order; later partial fills rely on the recorded fill. A smart
+    ///      wallet that later revokes its EIP-1271 approval does not stop them: to
+    ///      withdraw an order the maker must call `cancel`.
     /// @param secretIndex index of the maker secret this fill locks behind
     /// @param secretHash  sha256 of that secret, proven against `order.secretsRoot`
     function fill(
@@ -104,11 +131,30 @@ contract PactumIntents is HashLock {
         uint256 secretIndex,
         bytes32 secretHash,
         bytes32[] calldata proof
-    ) external returns (bytes32 swapId) {
+    ) public payable returns (bytes32 swapId) {
+        if (msg.value < order.minDeposit) revert DepositTooLow();
         bytes32 orderHash = hashOrder(order);
         _consume(order, orderHash, signature, fillAmount, secretIndex, secretHash, proof);
         swapId = _open(order, orderHash, fillAmount, secretIndex, secretHash);
-        order.srcToken.safeTransferFrom(order.maker, address(this), fillAmount);
+        _pullExact(order.srcToken, order.maker, fillAmount);
+    }
+
+    /// @notice `fill`, first applying the maker's EIP-2612 permit for `srcToken`.
+    /// @dev Removes the maker's last on-chain step: with a permit-capable token
+    ///      the maker never sends a transaction at all. If the permit was already
+    ///      used (e.g. front-run by someone submitting it directly) the fill still
+    ///      proceeds as long as the allowance is in place.
+    function fillWithPermit(
+        Order calldata order,
+        bytes calldata signature,
+        uint256 fillAmount,
+        uint256 secretIndex,
+        bytes32 secretHash,
+        bytes32[] calldata proof,
+        Permit calldata permit
+    ) external payable returns (bytes32 swapId) {
+        _applyPermit(order.srcToken, order.maker, permit, fillAmount);
+        swapId = fill(order, signature, fillAmount, secretIndex, secretHash, proof);
     }
 
     /// @notice Maker cancels the unfilled remainder of an order.
@@ -179,7 +225,9 @@ contract PactumIntents is HashLock {
         if (block.timestamp > order.deadline) revert OrderExpired();
         _validate(order);
         // a recorded fill proves the signature was already checked for this hash
-        if (f.filled == 0) _checkSignature(order.maker, orderHash, signature);
+        if (f.filled == 0 && !_isValidSignature(order.maker, orderHash, signature)) {
+            revert InvalidSignature();
+        }
 
         uint256 filledAfter = f.filled + fillAmount;
         if (fillAmount == 0 || filledAfter > order.srcAmount) revert Overfill();
@@ -213,6 +261,8 @@ contract PactumIntents is HashLock {
             uint64(block.timestamp) + order.srcLock,
             keccak256(abi.encode(orderHash, secretIndex))
         );
+        // the whole msg.value is the deposit; credited on settlement (see HashLock.deposits)
+        deposits[swapId] = msg.value;
         emit OrderFilled(
             orderHash,
             swapId,
@@ -221,6 +271,19 @@ contract PactumIntents is HashLock {
             secretIndex,
             owedDstAmount(order, fillAmount, block.timestamp)
         );
+    }
+
+    /// @dev A failed permit is fine if the allowance already covers this fill: the
+    ///      permit may have been front-run, or consumed by an earlier partial fill.
+    function _applyPermit(address token, address owner, Permit calldata p, uint256 needed)
+        internal
+    {
+        try IERC20Permit(token).permit(owner, address(this), p.value, p.deadline, p.v, p.r, p.s) {}
+        catch {
+            if (IERC20Permit(token).allowance(owner, address(this)) < needed) {
+                revert PermitFailed();
+            }
+        }
     }
 
     function _validate(Order calldata o) internal pure {
@@ -232,18 +295,5 @@ contract PactumIntents is HashLock {
         ) {
             revert BadOrder();
         }
-    }
-
-    function _checkSignature(address maker, bytes32 digest, bytes calldata sig) internal view {
-        if (maker.code.length > 0) {
-            // EIP-1271 smart-contract wallets (Safe, 4337 accounts, ...)
-            (bool ok, bytes memory ret) =
-                maker.staticcall(abi.encodeWithSelector(_ERC1271_MAGIC, digest, sig));
-            if (!ok || ret.length < 32 || abi.decode(ret, (bytes4)) != _ERC1271_MAGIC) {
-                revert InvalidSignature();
-            }
-            return;
-        }
-        if (_recover(digest, sig) != maker) revert InvalidSignature();
     }
 }

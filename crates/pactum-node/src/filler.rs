@@ -9,7 +9,7 @@ use pactum_core::{
 use pactum_relay::{OpenOrder, RelayClient};
 use tracing::{debug, info, warn};
 
-use crate::Chain;
+use crate::{Chain, store::JsonStore};
 
 /// A resolver's pricing strategy.
 pub trait Bid: Send + Sync {
@@ -43,14 +43,14 @@ impl Bid for FixedRate {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JobStatus {
     Locked,
     Settled,
     Refunded,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Job {
     pub order_hash: B256,
     pub index: usize,
@@ -76,6 +76,7 @@ pub struct IntentFiller<B> {
     policy: TimelockPolicy,
     /// Total source units this filler will buy; refunded fills give budget back.
     budget: Option<U256>,
+    store: Option<JsonStore<Vec<Job>>>,
     pub jobs: Vec<Job>,
 }
 
@@ -87,6 +88,7 @@ impl<B: Bid> IntentFiller<B> {
             bid,
             policy: TimelockPolicy::default(),
             budget: None,
+            store: None,
             jobs: Vec::new(),
         }
     }
@@ -101,13 +103,44 @@ impl<B: Bid> IntentFiller<B> {
         self
     }
 
+    /// Persist jobs to `path`, resuming any saved there by a previous run so
+    /// open escrows are still settled or refunded after a restart.
+    pub fn with_store(mut self, path: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let store = JsonStore::<Vec<Job>>::new(path);
+        if let Some(jobs) = store.load()? {
+            info!(count = jobs.len(), "resumed jobs");
+            self.jobs = jobs;
+        }
+        self.store = Some(store);
+        Ok(self)
+    }
+
+    fn persist(&self) -> anyhow::Result<()> {
+        match &self.store {
+            Some(s) => s.save(&self.jobs),
+            None => Ok(()),
+        }
+    }
+
     pub async fn tick(&mut self) -> anyhow::Result<()> {
         for o in self.relay.orders().await? {
             if let Err(e) = self.try_fill(&o).await {
                 debug!(order = %o.hash, "not filled: {e:#}");
             }
         }
-        self.settle().await
+        self.settle().await?;
+        self.collect_deposits().await
+    }
+
+    /// Settling credits our deposits to HashLock's pull ledger; sweep them back.
+    async fn collect_deposits(&self) -> anyhow::Result<()> {
+        for chain in self.chains.values() {
+            let got = chain.withdraw_deposits().await?;
+            if !got.is_zero() {
+                info!(chain = chain.name, amount = %got, "withdrew deposits");
+            }
+        }
+        Ok(())
     }
 
     fn spent(&self) -> U256 {
@@ -158,7 +191,15 @@ impl<B: Bid> IntentFiller<B> {
         let secret_hash = *hashes.get(index).ok_or_else(|| anyhow::anyhow!("no hash {index}"))?;
 
         let fill = src
-            .fill(order, o.signed.signature.clone(), amount, index, secret_hash, tree.proof(index))
+            .fill(
+                order,
+                o.signed.signature.clone(),
+                amount,
+                index,
+                secret_hash,
+                tree.proof(index),
+                o.signed.permit.as_ref(),
+            )
             .await?;
         let src_expiry = src.escrow(fill.swap_id).await?.expiry;
         let Some(dst_expiry) = self.policy.follower_expiry(src_expiry, dst.now().await?) else {
@@ -191,10 +232,19 @@ impl<B: Bid> IntentFiller<B> {
             dst_expiry,
             status: JobStatus::Locked,
         });
-        Ok(())
+        self.persist()
     }
 
     async fn settle(&mut self) -> anyhow::Result<()> {
+        let before: Vec<JobStatus> = self.jobs.iter().map(|j| j.status).collect();
+        let result = self.settle_jobs().await;
+        if self.jobs.iter().map(|j| j.status).ne(before) {
+            self.persist()?;
+        }
+        result
+    }
+
+    async fn settle_jobs(&mut self) -> anyhow::Result<()> {
         for job in self.jobs.iter_mut().filter(|j| j.status == JobStatus::Locked) {
             let src = &self.chains[&job.src_chain];
             let dst = &self.chains[&job.dst_chain];

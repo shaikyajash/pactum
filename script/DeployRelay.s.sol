@@ -3,31 +3,34 @@ pragma solidity 0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {HashLock} from "../src/HashLock.sol";
-import {SecretRelay} from "../src/layerzero/SecretRelay.sol";
+import {SecretRelay} from "../src/ccip/SecretRelay.sol";
+import {IRouterClient} from "../src/ccip/Client.sol";
 
-/// @notice Deploy a SecretRelay next to an existing HashLock and wire up peers.
+/// @notice Deploy a CCIP SecretRelay next to an existing PactumIntents/HashLock.
 ///
-///   LZ_ENDPOINT=0x1a44076050125825900e736c501f859c50fE728c \
-///   HASHLOCK=0x... OWNER=0x... \
+///   CCIP_ROUTER=0x... HASHLOCK=0x... OWNER=0x... \
 ///   forge script script/DeployRelay.s.sol --rpc-url $RPC_URL --broadcast --account deployer
 ///
-/// Then on each chain, once both relays exist:
+/// Then on each chain, once both relays exist, allowlist the other side:
 ///
-///   cast send $RELAY "setPeer(uint32,bytes32)" $REMOTE_EID $(cast to-bytes32 $REMOTE_RELAY)
+///   cast send $RELAY "setPeer(uint64,address)" $REMOTE_CHAIN_SELECTOR $REMOTE_RELAY
 ///
-/// EndpointV2 is 0x1a44076050125825900e736c501f859c50fE728c on most mainnets and
-/// 0x6EDCE65403992e310A62460808c4b910D972f10f on most testnets; check the
-/// LayerZero deployments page for the chain you are targeting.
+/// Router addresses and chain selectors per network are listed in the CCIP
+/// directory (docs.chain.link/ccip/directory). Testnet examples:
+///   Sepolia       router 0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59  selector 16015286601757825753
+///   Base Sepolia  router 0xD3b06cEbF099CE7DA4AcCf578aaebFDBd6e88a93  selector 10344971235874465080
 contract DeployRelay is Script {
     function run() external returns (SecretRelay relay) {
-        address endpoint = vm.envAddress("LZ_ENDPOINT");
-        HashLock htlc = HashLock(vm.envAddress("HASHLOCK"));
+        IRouterClient router = IRouterClient(vm.envAddress("CCIP_ROUTER"));
+        HashLock htlc = HashLock(payable(vm.envAddress("HASHLOCK")));
         address owner = vm.envAddress("OWNER");
 
+        require(owner != address(0), "OWNER must be set");
         require(address(htlc).code.length > 0, "HASHLOCK not deployed on this chain");
+        require(address(router).code.length > 0, "CCIP_ROUTER not deployed on this chain");
 
         vm.broadcast();
-        relay = new SecretRelay(endpoint, htlc, owner);
+        relay = new SecretRelay(router, htlc, owner);
         console2.log("SecretRelay deployed at", address(relay), "on chain", block.chainid);
     }
 }

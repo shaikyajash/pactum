@@ -10,7 +10,8 @@ use anyhow::{Context, bail};
 use pactum_core::Order;
 use serde::Deserialize;
 
-use crate::contracts::{IERC20, PactumIntents, to_binding};
+use crate::contracts::{IERC20, IERC20Permit, PactumIntents, permit_binding, to_binding};
+use pactum_core::permit::SignedPermit;
 
 /// Native asset sentinel, as in `HashLock.NATIVE`.
 pub const NATIVE: Address = Address::ZERO;
@@ -108,6 +109,31 @@ impl Chain {
         })
     }
 
+    pub async fn deposit(&self, swap_id: B256) -> anyhow::Result<U256> {
+        Ok(self.htlc().deposits(swap_id).call().await?)
+    }
+
+    /// Deposits credited to `account` and not yet withdrawn.
+    pub async fn deposit_credit(&self, account: Address) -> anyhow::Result<U256> {
+        Ok(self.htlc().depositCredit(account).call().await?)
+    }
+
+    /// Share of a deposit paid to whoever refunds an expired escrow, in bps.
+    pub async fn keeper_tip_bps(&self) -> anyhow::Result<U256> {
+        Ok(self.htlc().KEEPER_TIP_BPS().call().await?)
+    }
+
+    /// Withdraw our credited deposits if there are any; returns the amount.
+    pub async fn withdraw_deposits(&self) -> anyhow::Result<U256> {
+        let credit = self.deposit_credit(self.account).await?;
+        if credit.is_zero() {
+            return Ok(credit);
+        }
+        let r = self.htlc().withdrawDeposits().send().await?.get_receipt().await?;
+        self.confirm("withdrawDeposits", r).await?;
+        Ok(credit)
+    }
+
     pub async fn progress(&self, order_hash: B256) -> anyhow::Result<(U256, usize)> {
         let f = self.htlc().fills(order_hash).call().await?;
         Ok((f.filled, f.nextIndex as usize))
@@ -162,6 +188,16 @@ impl Chain {
         self.confirm("refund", r).await.map(drop)
     }
 
+    /// `name()` and the owner's EIP-2612 nonce, for signing a permit.
+    pub async fn permit_info(
+        &self,
+        token: Address,
+        owner: Address,
+    ) -> anyhow::Result<(String, U256)> {
+        let t = IERC20Permit::new(token, self.provider.clone());
+        Ok((t.name().call().await?, t.nonces(owner).call().await?))
+    }
+
     pub async fn ensure_allowance(&self, token: Address, amount: U256) -> anyhow::Result<()> {
         if token == NATIVE {
             return Ok(());
@@ -174,6 +210,8 @@ impl Chain {
         self.confirm("approve", r).await.map(drop)
     }
 
+    /// Fill a signed order, applying the maker's permit first when one is given.
+    #[allow(clippy::too_many_arguments)]
     pub async fn fill(
         &self,
         order: &Order,
@@ -182,14 +220,24 @@ impl Chain {
         index: usize,
         secret_hash: B256,
         proof: Vec<B256>,
+        permit: Option<&SignedPermit>,
     ) -> anyhow::Result<Filled> {
-        let receipt = self
-            .htlc()
-            .fill(to_binding(order), signature, amount, U256::from(index), secret_hash, proof)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let (htlc, o, i) = (self.htlc(), to_binding(order), U256::from(index));
+        let pending = match permit {
+            Some(p) => {
+                htlc.fillWithPermit(o, signature, amount, i, secret_hash, proof, permit_binding(p))
+                    .value(order.minDeposit)
+                    .send()
+                    .await?
+            }
+            None => {
+                htlc.fill(o, signature, amount, i, secret_hash, proof)
+                    .value(order.minDeposit)
+                    .send()
+                    .await?
+            }
+        };
+        let receipt = pending.get_receipt().await?;
         let receipt = self.confirm("fill", receipt).await?;
         receipt
             .inner
@@ -215,6 +263,23 @@ impl Chain {
             .to_block(to)
             .query()
             .await?;
+        Ok(logs
+            .into_iter()
+            .map(|(e, _)| Lock {
+                swap_id: e.swapId,
+                initiator: e.initiator,
+                redeemer: e.redeemer,
+                token: e.token,
+                amount: e.amount,
+                secret_hash: e.secretHash,
+                expiry: e.expiry,
+            })
+            .collect())
+    }
+
+    /// Every escrow opened on this chain in `[from, to]`.
+    pub async fn locks_from(&self, from: u64, to: u64) -> anyhow::Result<Vec<Lock>> {
+        let logs = self.htlc().Initiated_filter().from_block(from).to_block(to).query().await?;
         Ok(logs
             .into_iter()
             .map(|(e, _)| Lock {

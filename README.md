@@ -12,8 +12,8 @@ time-locked contracts, so either both legs of every fill happen or neither does.
 
 | | |
 |---|---|
-| **On-chain** (Solidity / Foundry) | `HashLock` HTLC · `PactumIntents` signed orders, Dutch auction, Merkle-committed partial fills · `SecretRelay` LayerZero V2 auto-settlement |
-| **Off-chain** (Rust / alloy / tokio / axum) | `pactum-core` protocol math · `pactum-relay` untrusted order relay · `pactum-node` maker agent, resolver daemon and `pactum` CLI |
+| **On-chain** (Solidity / Foundry) | `HashLock` HTLC · `PactumIntents` signed orders, Dutch auction, Merkle-committed partial fills · `SecretRelay` Chainlink CCIP auto-settlement |
+| **Off-chain** (Rust / alloy / tokio / axum) | `pactum-core` protocol math · `pactum-relay` untrusted order relay · `pactum-node` maker agent, resolver, keeper and `pactum` CLI |
 
 ## How an intent settles
 
@@ -38,7 +38,9 @@ sequenceDiagram
     X->>A: redeem(secretᵢ)  — X paid
 ```
 
-The maker's only on-chain action, ever, is a one-time ERC20 approval.
+With a permit-capable token (USDC, DAI, …) the maker signs an EIP-2612 permit
+alongside the order and **never sends a transaction on any chain**, not even an
+approval.
 
 ## What makes it interesting
 
@@ -69,11 +71,29 @@ Once a secret is revealed to settle one fill, it is public. Because no later
 fill can lock behind it, nobody can use it to drain a later escrow. Leaves bind
 `(index, hash)`, so a proof for secret 3 can never be passed off as secret 1.
 
-### 4. LayerZero for liveness, never for safety
-`SecretRelay` carries revealed secrets across chains and redeems the other leg
-automatically. A forged or replayed message can't move funds anywhere they
-couldn't already go, because `redeem` re-checks `sha256(secret)` and pays a fixed
-address. This is fuzzed in `testFuzz_forgedMessagesCannotMisdirectFunds`.
+### 4. Safety deposits keep the failure path gasless too
+Every fill posts a native deposit (`order.minDeposit`), credited to a pull
+ledger when the escrow settles:
+
+| Settlement | Who is credited |
+|---|---|
+| `redeem` (swap completed) | the resolver gets its deposit back, whoever submits the secret |
+| `instantRefund` (resolver consented) | the resolver |
+| `refund` after expiry (fill abandoned) | **10%** to the keeper who called it, **90%** to the maker |
+
+So if a resolver locks the maker's funds and walks away, a keeper running
+`pactum keeper` is paid to refund the maker, and the maker is compensated
+for the wait. A griefer who refunds itself still forfeits 90% of its deposit.
+Credits are withdrawn with `withdrawDeposits`, so a party that rejects ETH can
+never block settlement.
+
+### 5. Chainlink CCIP for liveness, never for safety
+`SecretRelay` carries revealed secrets to the other chain over CCIP and redeems
+the other leg automatically. A forged or replayed message can't move funds
+anywhere they couldn't already go, because `redeem` re-checks `sha256(secret)`
+and pays a fixed address (fuzzed in `testFuzz_forgedMessagesCannotMisdirectFunds`).
+Each entry gets a fixed gas budget, so one hostile redeemer can't starve the rest
+of a batch, and an under-funded delivery reverts so CCIP can re-execute it.
 
 ## Security model
 
@@ -85,29 +105,38 @@ address. This is fuzzed in `testFuzz_forgedMessagesCannotMisdirectFunds`.
 | A revealed secret is reused for a later fill | Secret indices are strictly increasing per order (`WrongSecretIndex`) |
 | Resolver tampers with order terms | Any change alters the EIP-712 digest → `InvalidSignature` |
 | Relay lies | It stores only verifiable data; signatures, roots and preimages are re-checked on-chain and by agents |
-| Smart-contract wallet makers | EIP-1271 signatures are supported at fill time |
+| Smart-contract wallet makers | EIP-1271 (and EIP-7702 delegated EOAs) for fills and instant refunds |
+| A resolver abandons a fill | Keeper refunds after expiry; the resolver forfeits 90% of its deposit to the maker |
+| MEV takes a resolver's deposit by redeeming first | Deposits are credited to the swap's redeemer, not the caller |
 | Cross-chain replay | Swap ids and the EIP-712 domain commit to `chainid` and contract address |
 | Non-standard ERC20s | `SafeTransfer` handles USDT-style tokens that return nothing |
 
-**Not supported:** fee-on-transfer and rebasing tokens.
+**Not supported:** fee-on-transfer tokens (rejected on deposit with
+`UnsupportedToken`) and rebasing tokens.
+
+The contracts went through an internal security review; findings and fixes are
+recorded in [SECURITY.md](SECURITY.md).
 
 ## Testing
 
 ```
-forge test        68 Solidity tests: unit, fuzz, and stateful invariants
-cargo test        Rust unit + HTTP tests, plus a full two-chain e2e on anvil
+forge test        115 Solidity tests: unit, fuzz, stateful invariants, audit regressions
+cargo test        Rust unit + HTTP tests, plus three two-chain e2e scenarios on anvil
 ```
 
 Highlights:
 - **Invariants** (`test/invariant/`): balance conservation and settlement
-  finality for `HashLock`; no overfill, escrow = fills, and one-use secrets
-  under random concurrent partial fills for `PactumIntents`.
+  finality for `HashLock`; no overfill, escrow = fills, one-use secrets, and
+  native balance = open deposits + credits under random concurrent fills.
 - **Cross-language vectors**: the Rust Merkle tree, swap ids and EIP-712 type
   hash are checked against values produced by the Solidity code.
-- **End-to-end** ([`e2e.rs`](crates/pactum-node/tests/e2e.rs)): two anvil chains,
-  a live relay, one maker and two competing resolvers. Resolver A fills 60% early
-  at a higher price, resolver B takes the rest later, and the test asserts the
-  maker's nonce on the destination chain is still **0**.
+- **End-to-end** ([`e2e.rs`](crates/pactum-node/tests/e2e.rs)), on two live anvil
+  chains with a real relay:
+  - two resolvers split one permit-signed order at different auction prices, and
+    the maker's transaction count is **0 on both chains**;
+  - a rogue resolver abandons a fill, and a keeper refunds the maker for its tip
+    while the maker is credited 90% of the forfeited deposit;
+  - a resolver crashes mid-swap and a fresh process settles from its state file.
 
 ## Layout
 
@@ -117,11 +146,14 @@ src/
   PactumIntents.sol          signed orders, Dutch auction, Merkle partial fills
   lib/MerkleSecrets.sol      index-bound secret commitments
   lib/SafeTransfer.sol       safe ERC20 + native transfers
-  layerzero/SecretRelay.sol  LayerZero V2 OApp for automatic settlement
+  interfaces/IERC20Permit.sol
+  ccip/SecretRelay.sol       Chainlink CCIP app for automatic settlement
+  ccip/Client.sol            CCIP message types (layout-compatible with Chainlink)
 crates/
   pactum-core/               orders, EIP-712, secret trees, auction, timelocks
   pactum-relay/              axum relay server + reqwest client
-  pactum-node/               alloy chain adapter, Maker, IntentFiller, `pactum` CLI
+  pactum-node/               alloy chain adapter, Maker, IntentFiller, Keeper,
+                             crash-safe state, and the `pactum` CLI
 script/                      CREATE2 deploys for PactumIntents and SecretRelay
 test/                        Foundry unit, fuzz, invariant and e2e tests
 ```
@@ -147,20 +179,26 @@ Run a relay, a resolver and an intent (amounts in base units):
 cargo run --release -- relay --listen 0.0.0.0:8080
 
 RESOLVER_KEY=0x... cargo run --release -- resolve -c config.json \
-  --rate-num 300000000000000000 --rate-den 1000000000000000000000 --max-fill-bps 6000
+  --rate-num 300000000000000000 --rate-den 1000000000 --max-fill-bps 6000 \
+  --state resolver.json
 
 MAKER_KEY=0x... cargo run --release -- intent -c config.json \
   --from sepolia --to base-sepolia \
-  --sell-token 0xUSDC --sell-amount 1000000000000000000000 \
-  --start 500000000000000000 --floor 250000000000000000 --parts 4
+  --sell-token 0xUSDC --sell-amount 1000000000 \
+  --start 500000000000000000 --floor 250000000000000000 --parts 4 \
+  --min-deposit 1000000000000000 --permit-version 2 --state maker.json
+
+KEEPER_KEY=0x... cargo run --release -- keeper -c config.json
 ```
 
 ## Roadmap
 
+- [x] Resolver safety deposits with keeper tips and maker compensation
+- [x] EIP-2612 permits, so the maker never sends a transaction
+- [x] Persistent maker and resolver state
+- [x] Chainlink CCIP secret relay
 - [ ] Testnet deployments (Sepolia, Base Sepolia, Arbitrum Sepolia)
-- [ ] Resolver safety deposits, so a resolver that abandons a fill pays for the maker's wait
-- [ ] Permit2, so the maker's one-time approval becomes a signature too
-- [ ] Persistent maker and resolver state (currently in-memory)
+- [ ] Permit2 for tokens without EIP-2612
 - [ ] Route secrets through `SecretRelay` from the resolver daemon
 - [ ] Bitcoin leg via P2WSH HTLC scripts
 

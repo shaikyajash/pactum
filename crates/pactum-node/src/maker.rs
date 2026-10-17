@@ -5,11 +5,15 @@ use alloy::{
     signers::{SignerSync, local::PrivateKeySigner},
 };
 use anyhow::ensure;
-use pactum_core::{Order, OrderSecrets, timelock::TimelockPolicy};
+use pactum_core::{
+    Order, OrderSecrets, Secret,
+    permit::{Permit, SignedPermit, TokenDomain},
+    timelock::TimelockPolicy,
+};
 use pactum_relay::{RelayClient, SecretRelease, SignedOrder};
 use tracing::info;
 
-use crate::Chain;
+use crate::{Chain, store::JsonStore};
 
 #[derive(Clone, Debug)]
 pub struct IntentRequest {
@@ -26,6 +30,12 @@ pub struct IntentRequest {
     pub src_lock: u64,
     pub parts: u16,
     pub receiver: Option<Address>,
+    /// Native deposit each fill must post; paid to whoever settles the escrow,
+    /// so keepers are paid to refund us if a resolver walks away.
+    pub min_deposit: U256,
+    /// Sign an EIP-2612 permit with this domain version instead of relying on a
+    /// prior `approve`. `None` means the allowance is already in place.
+    pub permit_version: Option<String>,
 }
 
 pub struct OpenIntent {
@@ -43,6 +53,46 @@ impl OpenIntent {
     }
 }
 
+/// On-disk form of an [`OpenIntent`]. Holds unrevealed secrets.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedIntent {
+    order: Order,
+    hash: B256,
+    secrets: Vec<Secret>,
+    released: Vec<usize>,
+    src_from: u64,
+    dst_from: u64,
+}
+
+impl From<&OpenIntent> for SavedIntent {
+    fn from(i: &OpenIntent) -> Self {
+        let mut released: Vec<usize> = i.released.iter().copied().collect();
+        released.sort_unstable();
+        Self {
+            order: i.order.clone(),
+            hash: i.hash,
+            secrets: i.secrets.secrets.clone(),
+            released,
+            src_from: i.src_from,
+            dst_from: i.dst_from,
+        }
+    }
+}
+
+impl From<SavedIntent> for OpenIntent {
+    fn from(s: SavedIntent) -> Self {
+        Self {
+            order: s.order,
+            hash: s.hash,
+            secrets: OrderSecrets::from_secrets(s.secrets),
+            released: s.released.into_iter().collect(),
+            src_from: s.src_from,
+            dst_from: s.dst_from,
+        }
+    }
+}
+
 /// Maker side of an intent. Signs once, then for every fill checks that the
 /// resolver locked enough on the destination chain before releasing that
 /// fill's secret. The maker never sends a transaction.
@@ -52,11 +102,35 @@ pub struct Maker {
     signer: PrivateKeySigner,
     relay: RelayClient,
     policy: TimelockPolicy,
+    store: Option<JsonStore<SavedIntent>>,
 }
 
 impl Maker {
     pub fn new(src: Chain, dst: Chain, signer: PrivateKeySigner, relay: RelayClient) -> Self {
-        Self { src, dst, signer, relay, policy: TimelockPolicy::default() }
+        Self { src, dst, signer, relay, policy: TimelockPolicy::default(), store: None }
+    }
+
+    /// Persist the intent (including its secrets) to `path`.
+    pub fn with_store(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.store = Some(JsonStore::new(path));
+        self
+    }
+
+    /// Resume an intent saved by a previous run, if any.
+    pub fn resume(&self) -> anyhow::Result<Option<OpenIntent>> {
+        let Some(store) = &self.store else { return Ok(None) };
+        Ok(store.load()?.map(|saved: SavedIntent| {
+            let intent = OpenIntent::from(saved);
+            info!(hash = %intent.hash, released = intent.released.len(), "resumed intent");
+            intent
+        }))
+    }
+
+    fn persist(&self, intent: &OpenIntent) -> anyhow::Result<()> {
+        match &self.store {
+            Some(s) => s.save(&SavedIntent::from(intent)),
+            None => Ok(()),
+        }
     }
 
     pub fn with_policy(mut self, policy: TimelockPolicy) -> Self {
@@ -84,27 +158,63 @@ impl Maker {
             parts: req.parts,
             secretsRoot: secrets.root(),
             nonce,
+            minDeposit: req.min_deposit,
         };
         let digest = order.digest(self.src.id, self.src.contract);
         let signature = self.signer.sign_hash_sync(&digest)?;
+        let permit = match &req.permit_version {
+            Some(version) => Some(self.sign_permit(&order, version).await?),
+            None => None,
+        };
         let signed = SignedOrder {
             order: order.clone(),
             signature: signature.as_bytes().into(),
             src_chain_id: self.src.id,
             contract: self.src.contract,
             secret_hashes: secrets.hashes(),
+            permit,
         };
-        let hash = self.relay.post(&signed).await?;
-        ensure!(hash == digest, "relay returned a different order hash");
-        info!(%hash, "intent opened");
-
-        Ok(OpenIntent {
+        let intent = OpenIntent {
             order,
-            hash,
+            hash: digest,
             secrets,
             released: HashSet::new(),
             src_from: self.src.head().await?,
             dst_from: self.dst.head().await?,
+        };
+        // save before posting: once the order is public it can be filled, and
+        // losing the secrets then would strand every fill until it times out
+        self.persist(&intent)?;
+
+        let hash = self.relay.post(&signed).await?;
+        ensure!(hash == digest, "relay returned a different order hash");
+        info!(%hash, "intent opened");
+        Ok(intent)
+    }
+
+    /// Permit the intents contract to pull the whole order, valid until the deadline.
+    async fn sign_permit(&self, order: &Order, version: &str) -> anyhow::Result<SignedPermit> {
+        let (name, nonce) = self.src.permit_info(order.srcToken, order.maker).await?;
+        let permit = Permit {
+            owner: order.maker,
+            spender: self.src.contract,
+            value: order.srcAmount,
+            nonce,
+            deadline: U256::from(order.deadline),
+        };
+        let domain = TokenDomain {
+            name,
+            version: version.to_owned(),
+            chain_id: self.src.id,
+            token: order.srcToken,
+        };
+        let sig = self.signer.sign_hash_sync(&permit.digest(&domain))?;
+        Ok(SignedPermit {
+            value: permit.value,
+            deadline: permit.deadline,
+            v: 27 + sig.v() as u8,
+            r: sig.r().into(),
+            s: sig.s().into(),
         })
     }
 
@@ -144,6 +254,7 @@ impl Maker {
             };
             self.relay.release(intent.hash, &release).await?;
             intent.released.insert(f.secret_index);
+            self.persist(intent)?;
             info!(order = %intent.hash, index = f.secret_index, lock = %lock.swap_id, "secret released");
         }
         Ok(())
