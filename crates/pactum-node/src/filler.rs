@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 use crate::{
     Chain,
     btc::{BtcLeg, BtcLock, btc_refund_after},
+    sol::{SolLeg, SolLock},
     store::JsonStore,
 };
 
@@ -24,6 +25,7 @@ enum Dst<'a> {
         token: alloy::primitives::Address,
     },
     Bitcoin(&'a BtcLeg),
+    Solana(&'a SolLeg),
 }
 
 /// A resolver's pricing strategy.
@@ -80,6 +82,9 @@ pub struct Job {
     /// `dst_chain`/`dst_swap` are unused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub btc: Option<BtcLock>,
+    /// Solana escrow, when the destination is Solana.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sol: Option<SolLock>,
 }
 
 /// Resolver for gasless intents.
@@ -97,6 +102,7 @@ pub struct IntentFiller<B> {
     budget: Option<U256>,
     store: Option<JsonStore<Vec<Job>>>,
     btc: Option<BtcLeg>,
+    sol: Option<SolLeg>,
     pub jobs: Vec<Job>,
 }
 
@@ -110,6 +116,7 @@ impl<B: Bid> IntentFiller<B> {
             budget: None,
             store: None,
             btc: None,
+            sol: None,
             jobs: Vec::new(),
         }
     }
@@ -122,6 +129,12 @@ impl<B: Bid> IntentFiller<B> {
     /// Also fill orders whose destination is this Bitcoin network.
     pub fn with_bitcoin(mut self, leg: BtcLeg) -> Self {
         self.btc = Some(leg);
+        self
+    }
+
+    /// Also fill orders whose destination is this Solana cluster.
+    pub fn with_solana(mut self, leg: SolLeg) -> Self {
+        self.sol = Some(leg);
         self
     }
 
@@ -244,6 +257,7 @@ impl<B: Bid> IntentFiller<B> {
             dst_expiry: 0,
             status: JobStatus::Locked,
             btc: None,
+            sol: None,
         };
 
         match dst {
@@ -270,6 +284,28 @@ impl<B: Bid> IntentFiller<B> {
                 job.dst_expiry = refund_after;
                 job.btc = Some(lock);
             }
+            Dst::Solana(sol) => {
+                let now = u64::try_from(sol.now().await?)?;
+                let Some(expiry) = self.policy.follower_expiry(src_expiry, now) else {
+                    warn!(order = %o.hash, "source lock too short for a safe counter-lock");
+                    return Ok(());
+                };
+                let lamports = u64::try_from(fill.owed)?;
+                // the source swap id is unique per fill, so it names the escrow
+                let lock = sol
+                    .lock(
+                        fill.swap_id,
+                        order.receiver,
+                        secret_hash,
+                        lamports,
+                        i64::try_from(expiry)?,
+                    )
+                    .await?;
+                let ann = pactum_relay::LockAnnouncement::Solana { index, swap_id: fill.swap_id };
+                self.relay.announce(o.hash, &ann).await?;
+                job.dst_expiry = expiry;
+                job.sol = Some(lock);
+            }
         }
 
         info!(order = %o.hash, %amount, index, owed = %fill.owed, "filled");
@@ -281,6 +317,10 @@ impl<B: Bid> IntentFiller<B> {
         if let Some(btc) = self.btc.as_ref().filter(|b| b.handles(order.dstChainId)) {
             // only native BTC; token words are meaningless on Bitcoin
             return order.dstToken.is_zero().then_some(Dst::Bitcoin(btc));
+        }
+        if let Some(sol) = self.sol.as_ref().filter(|s| s.handles(order.dstChainId)) {
+            // native SOL only for now
+            return order.dstToken.is_zero().then_some(Dst::Solana(sol));
         }
         // EVM ids fit in u64; non-EVM ids are 256-bit hashes
         let chain = self.chains.get(&u64::try_from(order.dstChainId).ok()?)?;
@@ -323,6 +363,30 @@ impl<B: Bid> IntentFiller<B> {
                     btc.refund(lock).await?;
                     job.status = JobStatus::Refunded;
                     info!(outpoint = %lock.outpoint, "refunded bitcoin lock");
+                }
+                continue;
+            }
+
+            if let Some(lock) = &job.sol {
+                let sol = self.sol.as_ref().ok_or_else(|| anyhow::anyhow!("no solana leg"))?;
+                let secret = match self.relay.secret(job.order_hash, job.index).await? {
+                    Some(s) => Some(<[u8; 32]>::try_from(s.as_ref())?),
+                    None => sol.revealed(lock).await?,
+                };
+                if let Some(secret) = secret {
+                    // pay the maker first (we pay the Solana fee), then ourselves
+                    sol.redeem_for(lock, secret).await?;
+                    if !src.escrow(job.src_swap).await?.settled {
+                        src.redeem(job.src_swap, secret.to_vec().into()).await?;
+                    }
+                    job.status = JobStatus::Settled;
+                    info!(swap = %job.src_swap, "settled against solana");
+                } else if u64::try_from(sol.now().await?)? >= job.dst_expiry
+                    && sol.state(lock).await? == Some(pactum_sol::EscrowState::Open)
+                {
+                    sol.refund(lock).await?;
+                    job.status = JobStatus::Refunded;
+                    info!(swap = %lock.swap_id, "refunded solana escrow");
                 }
                 continue;
             }
