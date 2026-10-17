@@ -255,3 +255,65 @@ impl BtcNode {
         pactum_node::btc::bitcoin::Amount::from_btc(b).unwrap().to_sat()
     }
 }
+
+// ------------------------------------------------------------------- solana
+
+use pactum_sol::{HtlcProgram, Keypair as SolKeypair, SolanaRpc};
+
+/// solana-test-validator in Docker with the Pactum program preloaded.
+pub struct SolNode {
+    id: String,
+    pub program: HtlcProgram,
+}
+
+impl Drop for SolNode {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["stop", &self.id]).output();
+    }
+}
+
+impl SolNode {
+    pub async fn start() -> Option<Self> {
+        let deploy = repo_root().join("programs/pactum-solana/target/deploy");
+        if !deploy.join("pactum_solana.so").exists()
+            || !Command::new("docker").arg("version").output().is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: needs docker and the cargo-build-sbf output");
+            return None;
+        }
+        let program_id = SolKeypair::from_seed([0x50; 32]).pubkey();
+        let out = Command::new("docker")
+            .args(["run", "-d", "--rm", "--platform", "linux/amd64", "--entrypoint", "sh"])
+            .args(["-p", "127.0.0.1::8899", "-v"])
+            .arg(format!("{}:/prog:ro", deploy.display()))
+            .args(["pactum-solana:dev", "-c"])
+            .arg(format!(
+                "solana-test-validator --reset --quiet --ledger /tmp/l --bpf-program {program_id} /prog/pactum_solana.so"
+            ))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "docker run failed");
+        let id = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        let port = String::from_utf8(
+            Command::new("docker").args(["port", &id, "8899"]).output().unwrap().stdout,
+        )
+        .unwrap();
+        let port = port.lines().next().unwrap().rsplit(':').next().unwrap().to_owned();
+        let rpc = SolanaRpc::new(format!("http://127.0.0.1:{port}"));
+        for _ in 0..120 {
+            if rpc.latest_blockhash().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Some(Self { id, program: HtlcProgram { id: program_id, rpc } })
+    }
+
+    pub fn leg(&self, key: SolKeypair) -> pactum_node::sol::SolLeg {
+        pactum_node::sol::SolLeg {
+            cluster: pactum_core::chains::SolanaCluster::Localnet,
+            program: self.program.clone(),
+            key,
+        }
+    }
+}

@@ -26,5 +26,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 pactum-btc.workspace = true
+pactum-sol.workspace = true
 axum.workspace = true
 alloy = { workspace = true, features = ["node-bindings"] }
