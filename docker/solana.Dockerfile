@@ -1,6 +1,8 @@
 # Solana build + test environment: Agave CLI/validator plus a Rust toolchain
 # for cargo-build-sbf. x86-only upstream; runs under emulation on Apple Silicon.
-FROM --platform=linux/amd64 anzaxyz/agave:v3.1.14
+# Pinned to Agave 2.3: 3.x requires io_uring, which Docker's emulation lacks.
+ARG PLATFORM=linux/amd64
+FROM --platform=${PLATFORM} anzaxyz/agave:v2.3.13
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config libssl-dev bzip2 \

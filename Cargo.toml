@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# built separately with cargo-build-sbf (see docker/solana.Dockerfile)
+exclude = ["programs/*"]
 
 [workspace.package]
 version = "0.1.0"
