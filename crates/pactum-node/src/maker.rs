@@ -46,8 +46,20 @@ pub struct OpenIntent {
     pub hash: B256,
     pub secrets: OrderSecrets,
     released: HashSet<usize>,
+    /// destination locks whose secret we released but that may still be open
+    pending: Vec<(usize, ReleasedLock)>,
     src_from: u64,
     dst_from: u64,
+}
+
+/// A destination lock we released a secret for. If the resolver doesn't
+/// redeem it to us in time we redeem it ourselves, since the secret is now
+/// public and the resolver could otherwise refund it and keep both legs.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+enum ReleasedLock {
+    Evm { swap_id: B256, expiry: u64 },
+    Solana { swap_id: B256, expiry: i64 },
 }
 
 impl OpenIntent {
@@ -64,6 +76,8 @@ struct SavedIntent {
     hash: B256,
     secrets: Vec<Secret>,
     released: Vec<usize>,
+    #[serde(default)]
+    pending: Vec<(usize, ReleasedLock)>,
     src_from: u64,
     dst_from: u64,
 }
@@ -77,6 +91,7 @@ impl From<&OpenIntent> for SavedIntent {
             hash: i.hash,
             secrets: i.secrets.secrets.clone(),
             released,
+            pending: i.pending.clone(),
             src_from: i.src_from,
             dst_from: i.dst_from,
         }
@@ -90,6 +105,7 @@ impl From<SavedIntent> for OpenIntent {
             hash: s.hash,
             secrets: OrderSecrets::from_secrets(s.secrets),
             released: s.released.into_iter().collect(),
+            pending: s.pending,
             src_from: s.src_from,
             dst_from: s.dst_from,
         }
@@ -245,6 +261,7 @@ impl Maker {
             hash: digest,
             secrets,
             released: HashSet::new(),
+            pending: Vec::new(),
             src_from: self.src.head().await?,
             dst_from: match &self.dst {
                 Some(dst) => dst.head().await?,
@@ -296,6 +313,8 @@ impl Maker {
             return self.tick_solana(sol, intent).await;
         }
         let dst = self.evm_dst()?;
+        self.rescue(intent).await?;
+        let dst_now = dst.now().await?;
         let fills = intent_fills(self, intent).await?;
         let (Some(receiver), Some(dst_token)) =
             (word_to_evm(intent.order.receiver), word_to_evm(intent.order.dstToken))
@@ -318,6 +337,9 @@ impl Maker {
                     && l.amount >= f.owed
                     // we must be able to redeem on dst before either side can refund
                     && self.policy.is_safe(l.expiry, src_escrow.expiry)
+                    // and the lock must stay open long enough for the secret to be used:
+                    // a short lock lets the resolver refund it after we reveal the secret
+                    && l.expiry >= dst_now + self.policy.min_follower_lock
             });
             // no valid counter-lock yet: keep the secret
             let Some(lock) = lock else { continue };
@@ -332,6 +354,10 @@ impl Maker {
             };
             self.relay.release(intent.hash, &release).await?;
             intent.released.insert(f.secret_index);
+            intent.pending.push((
+                f.secret_index,
+                ReleasedLock::Evm { swap_id: lock.swap_id, expiry: lock.expiry },
+            ));
             self.persist(intent)?;
             info!(order = %intent.hash, index = f.secret_index, lock = %lock.swap_id, "secret released");
         }
@@ -385,6 +411,8 @@ impl Maker {
     /// Verify each fill's announced Solana escrow and release its secret; the
     /// resolver then redeems the escrow to us, so we need no SOL for fees.
     async fn tick_solana(&self, sol: &SolLeg, intent: &mut OpenIntent) -> anyhow::Result<()> {
+        self.rescue(intent).await?;
+        let now = u64::try_from(sol.now().await?)?;
         let fills = intent_fills(self, intent).await?;
         let announced = self.relay.locks(intent.hash).await?;
 
@@ -396,19 +424,25 @@ impl Maker {
             let src_expiry = self.src.escrow(f.swap_id).await?.expiry;
             let owed = u64::try_from(f.owed)?;
 
-            let mut ok = false;
+            let mut found = None;
             for ann in announced.iter().filter(|a| a.index() == f.secret_index) {
-                match sol.verify(ann, secret.hash, owed, src_expiry, &self.policy).await {
+                match sol.verify(ann, secret.hash, owed, src_expiry, now, &self.policy).await {
                     Ok(_) => {
-                        ok = true;
+                        found = Some(ann.clone());
                         break;
                     }
                     Err(e) => tracing::debug!(index = f.secret_index, "escrow rejected: {e:#}"),
                 }
             }
-            if !ok {
+            let Some(pactum_relay::LockAnnouncement::Solana { swap_id, .. }) = found else {
                 continue;
-            }
+            };
+            let expiry = sol
+                .program
+                .escrow(&swap_id.0)
+                .await?
+                .map(|e| e.expiry)
+                .ok_or_else(|| anyhow::anyhow!("escrow vanished"))?;
             let release = SecretRelease {
                 index: f.secret_index,
                 secret: secret.secret.clone(),
@@ -416,10 +450,58 @@ impl Maker {
             };
             self.relay.release(intent.hash, &release).await?;
             intent.released.insert(f.secret_index);
+            intent.pending.push((f.secret_index, ReleasedLock::Solana { swap_id, expiry }));
             self.persist(intent)?;
             info!(order = %intent.hash, index = f.secret_index, "secret released for solana escrow");
         }
         Ok(())
+    }
+
+    /// Redeem released locks ourselves if the resolver leaves them open until
+    /// close to expiry. Costs us a fee, but only when a resolver misbehaves:
+    /// once a secret is public, an unredeemed lock is one the resolver could
+    /// refund while still claiming the source leg.
+    async fn rescue(&self, intent: &mut OpenIntent) -> anyhow::Result<()> {
+        let margin = self.policy.min_follower_lock / 2;
+        let mut still_open = Vec::new();
+        for (index, lock) in std::mem::take(&mut intent.pending) {
+            let secret = intent.secrets.secrets[index].secret.clone();
+            let open = match &lock {
+                ReleasedLock::Evm { swap_id, expiry } => {
+                    let dst = self.evm_dst()?;
+                    if dst.escrow(*swap_id).await?.settled {
+                        false
+                    } else if dst.now().await? + margin >= *expiry {
+                        tracing::warn!(swap = %swap_id, "resolver did not redeem to us; rescuing");
+                        dst.redeem(*swap_id, secret).await?;
+                        false
+                    } else {
+                        true
+                    }
+                }
+                ReleasedLock::Solana { swap_id, expiry } => {
+                    let sol = self.sol.as_ref().ok_or_else(|| anyhow::anyhow!("no solana leg"))?;
+                    let open = sol
+                        .program
+                        .escrow(&swap_id.0)
+                        .await?
+                        .is_some_and(|e| e.state == pactum_sol::EscrowState::Open);
+                    if open && sol.now().await? + margin as i64 >= *expiry {
+                        tracing::warn!(swap = %swap_id, "resolver did not redeem to us; rescuing");
+                        let s: [u8; 32] = secret.as_ref().try_into()?;
+                        sol.program.redeem(&sol.key, swap_id.0, sol.key.pubkey(), s).await?;
+                        false
+                    } else {
+                        open
+                    }
+                }
+            };
+            if open {
+                still_open.push((index, lock));
+            }
+        }
+        intent.pending = still_open;
+        self.persist(intent)
     }
 
     /// True once the order is fully filled and every fill's secret is released.

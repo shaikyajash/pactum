@@ -92,13 +92,15 @@ impl SolLeg {
 
     /// Check an announced escrow on chain before releasing a secret: owned by
     /// the program, open, paying our key at least `min_lamports` behind
-    /// `secret_hash`, and expiring early enough before the source escrow.
+    /// `secret_hash`, expiring early enough before the source escrow, and late
+    /// enough that the released secret can still be used on it.
     pub async fn verify(
         &self,
         ann: &LockAnnouncement,
         secret_hash: B256,
         min_lamports: u64,
         src_expiry: u64,
+        now: u64,
         policy: &TimelockPolicy,
     ) -> anyhow::Result<Escrow> {
         let LockAnnouncement::Solana { swap_id, .. } = ann else {
@@ -114,6 +116,11 @@ impl SolLeg {
         ensure!(
             policy.is_safe(u64::try_from(e.expiry)?, src_expiry),
             "escrow expires too close to the source escrow"
+        );
+        // a short escrow could be refunded by the resolver after we reveal
+        ensure!(
+            u64::try_from(e.expiry)? >= now + policy.min_follower_lock,
+            "escrow expires too soon to use the secret safely"
         );
         Ok(e)
     }

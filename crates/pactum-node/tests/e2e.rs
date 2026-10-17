@@ -254,3 +254,72 @@ async fn usdc_on_evm_for_native_btc() {
     // and never sent an EVM transaction
     assert_eq!(env.nonce(&env.a, maker_addr).await, 0);
 }
+
+/// Regression: a resolver whose counter-lock expires soon after it is opened
+/// could refund it once the maker reveals the secret, then claim the source
+/// leg with that secret. The maker must refuse to release for such a lock.
+#[tokio::test]
+async fn maker_refuses_short_counter_locks() {
+    let Some(env) = Env::setup().await else { return };
+    let maker = maker(&env);
+    let mut intent = maker.open(request(&env, 1), U256::from(5)).await.unwrap();
+    advance(&env.a, 600).await;
+
+    // a hostile policy: counter-lock expires ~2 minutes after the fill, yet
+    // still ends a full safety window before the source escrow
+    let hostile = pactum_core::timelock::TimelockPolicy {
+        safety_window: 6 * 3600 - 120,
+        min_follower_lock: 0,
+    };
+    let mut filler =
+        IntentFiller::new(env.chains(&env.resolver_a()), env.relay.clone(), rate("0.30", 10_000))
+            .with_policy(hostile);
+    filler.tick().await.unwrap();
+    assert_eq!(filler.jobs.len(), 1, "resolver filled and locked");
+
+    for _ in 0..3 {
+        maker.tick(&mut intent).await.unwrap();
+    }
+    assert!(intent.released().is_empty(), "secret must not be released for a short lock");
+}
+
+/// Regression: once the maker releases a secret, a resolver that never
+/// redeems the counter-lock to the maker could refund it at expiry. The maker
+/// rescues it by redeeming itself shortly before expiry.
+#[tokio::test]
+async fn maker_rescues_counter_lock_the_resolver_abandons() {
+    let Some(env) = Env::setup().await else { return };
+    let maker_addr = env.maker().address();
+    let maker = maker(&env);
+    let mut intent = maker.open(request(&env, 1), U256::from(6)).await.unwrap();
+    advance(&env.a, 600).await;
+
+    let mut filler =
+        IntentFiller::new(env.chains(&env.resolver_a()), env.relay.clone(), rate("0.30", 10_000));
+    filler.tick().await.unwrap(); // fills on A, locks ETH on B
+    let job = filler.jobs[0].clone();
+    drop(filler); // ...and then disappears without redeeming anything
+
+    maker.tick(&mut intent).await.unwrap();
+    assert_eq!(intent.released().len(), 1, "valid lock: secret released");
+
+    let b = Chain::connect(&env.cfg_b, env.maker()).unwrap();
+    let lock = b.escrow(job.dst_swap).await.unwrap();
+    assert!(!lock.settled);
+    let eth_before = env.eth_of(&env.b, maker_addr).await;
+
+    // not yet near expiry: the maker keeps waiting for the resolver
+    maker.tick(&mut intent).await.unwrap();
+    assert!(!b.escrow(job.dst_swap).await.unwrap().settled);
+
+    // 10 minutes before expiry: inside the rescue margin
+    let now = b.now().await.unwrap();
+    advance(&env.b, lock.expiry - now - 600).await;
+    maker.tick(&mut intent).await.unwrap();
+
+    assert!(b.escrow(job.dst_swap).await.unwrap().settled, "maker redeemed the lock itself");
+    let gained = env.eth_of(&env.b, maker_addr).await - eth_before;
+    // owed 0.25 ETH: the auction had decayed to its floor when the resolver filled
+    assert!(gained > parse_ether("0.249").unwrap(), "maker received its ETH (minus gas)");
+    assert_eq!(env.nonce(&env.b, maker_addr).await, 1, "the rescue is the maker's only tx");
+}
