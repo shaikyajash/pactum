@@ -113,4 +113,65 @@ impl BitcoinRpc {
             })
             .collect()
     }
+
+    /// Value and confirmations of an unspent output, or `None` if spent or unknown.
+    pub async fn tx_out(&self, outpoint: OutPoint) -> anyhow::Result<Option<(Amount, u64)>> {
+        let out: Value =
+            self.call("gettxout", json!([outpoint.txid, outpoint.vout, true])).await.or_else(
+                // Bitcoin Core returns JSON null for spent outputs
+                |e| if e.to_string().contains("empty result") { Ok(Value::Null) } else { Err(e) },
+            )?;
+        if out.is_null() {
+            return Ok(None);
+        }
+        let value = Amount::from_btc(out["value"].as_f64().context("value")?)?;
+        Ok(Some((value, out["confirmations"].as_u64().unwrap_or(0))))
+    }
+
+    /// Median-time-past of the tip: the clock `OP_CHECKLOCKTIMEVERIFY` timestamps use.
+    pub async fn median_time(&self) -> anyhow::Result<u64> {
+        let info: Value = self.call("getblockchaininfo", json!([])).await?;
+        info["mediantime"].as_u64().context("mediantime")
+    }
+
+    /// The transaction spending `outpoint`, searching blocks from `from_height`
+    /// to the tip and then the mempool (so a reveal is seen before it confirms).
+    pub async fn find_spend(
+        &self,
+        outpoint: OutPoint,
+        from_height: u64,
+    ) -> anyhow::Result<Option<Transaction>> {
+        let spends = |tx: &Transaction| tx.input.iter().any(|i| i.previous_output == outpoint);
+        let tip = self.block_count().await?;
+        for h in from_height..=tip {
+            let txs = self.block_txs(self.block_hash(h).await?).await?;
+            if let Some(tx) = txs.into_iter().find(spends) {
+                return Ok(Some(tx));
+            }
+        }
+        let mempool: Vec<Txid> = self.call("getrawmempool", json!([])).await?;
+        for txid in mempool {
+            if let Ok(tx) = self.raw_tx(txid).await {
+                if spends(&tx) {
+                    return Ok(Some(tx));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Send `amount` to `address` from this (wallet-scoped) client; returns the
+    /// outpoint created for `address`.
+    pub async fn send_to(&self, address: &Address, amount: Amount) -> anyhow::Result<OutPoint> {
+        let txid: Txid =
+            self.call("sendtoaddress", json!([address.to_string(), amount.to_btc()])).await?;
+        let tx = self.raw_tx(txid).await?;
+        let spk = address.script_pubkey();
+        let vout = tx
+            .output
+            .iter()
+            .position(|o| o.script_pubkey == spk)
+            .context("funding output not found")?;
+        Ok(OutPoint { txid, vout: vout as u32 })
+    }
 }
