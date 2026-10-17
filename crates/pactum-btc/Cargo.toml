@@ -1,0 +1,18 @@
+[package]
+name = "pactum-btc"
+description = "Bitcoin Taproot HTLC leg for Pactum cross-chain swaps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bitcoin = { version = "0.32", features = ["rand-std", "serde"] }
+anyhow.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
