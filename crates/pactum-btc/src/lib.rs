@@ -7,3 +7,5 @@ pub mod rpc;
 
 pub use htlc::{Htlc, HtlcError};
 pub use rpc::{BitcoinRpc, Utxo};
+
+pub use bitcoin;

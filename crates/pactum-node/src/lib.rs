@@ -1,6 +1,7 @@
 //! Off-chain agents for Pactum: the maker that signs intents and releases
 //! secrets, and the resolver that competes in the Dutch auction to fill them.
 
+pub mod btc;
 pub mod chain;
 pub mod config;
 pub mod contracts;

@@ -3253,6 +3253,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "pactum-btc",
  "pactum-core",
  "pactum-relay",
  "serde",
