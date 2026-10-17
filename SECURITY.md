@@ -44,6 +44,17 @@ The review also confirmed that `src/ccip/Client.sol` matches Chainlink CCIP:
 struct layouts, the `GenericExtraArgsV2` tag and encoding, and the
 `IAny2EVMMessageReceiver` interface id.
 
+## Found during the multichain work (October 2026)
+
+These came up while adding Bitcoin and Solana, and were fixed in the same
+change set:
+
+| Severity | Finding | Fix | Regression test |
+|---|---|---|---|
+| High | A maker released its secret for any counter-lock expiring a safety window before the source escrow, without checking the lock would stay open long enough. A resolver could lock for a few minutes, wait for the secret, refund its lock and claim the source leg with the public secret | Makers require `min_follower_lock` of remaining time, and redeem a released lock themselves if the resolver leaves it open into the last half of that window | `e2e.rs::maker_refuses_short_counter_locks`, `maker_rescues_counter_lock_the_resolver_abandons` (the first fails on the pre-fix code) |
+| Medium | `HashLock` accepted preimages of any length; Bitcoin legs require exactly 32 bytes, so a maker could choose a secret that unlocks EVM but never the Bitcoin counter-leg | 32-byte secrets enforced in `redeem`, the Solana program and the relay | `HashLock.t.sol::test_redeem_rejectsNon32ByteSecretEvenIfHashMatches` |
+| Medium | The first Bitcoin HTLC used a relative block-count refund lock, which drifts against the EVM leg's wall-clock expiry | Absolute `OP_CHECKLOCKTIMEVERIFY` refund at a Unix time, with a median-time-past margin | `pactum-btc/tests/regtest.rs::refund_after_absolute_lock` |
+
 ## Known limitations
 
 - Rebasing tokens are unsupported, and a balance check cannot detect them.
@@ -54,6 +65,11 @@ struct layouts, the `GenericExtraArgsV2` tag and encoding, and the
   its deposit, so resolvers should stop filling for such makers.
 - A griefed maker must re-sign with a fresh `secretsRoot`. Never reuse a
   `secretsRoot` across orders.
+- The Bitcoin claim uses a flat fee; a production agent should estimate fees
+  and be ready to bump with CPFP, since the claim must confirm before the
+  refund lock opens.
+- The Solana program and the Bitcoin scripts are outside the internal review
+  above and have only been tested, not reviewed.
 
 ## Reporting
 

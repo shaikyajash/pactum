@@ -2,18 +2,22 @@
 
 [![ci](https://github.com/shaikyajash/pactum/actions/workflows/ci.yml/badge.svg)](https://github.com/shaikyajash/pactum/actions/workflows/ci.yml)
 
-**Gasless, partially fillable cross-chain swaps with no bridge and no custodian.**
+**Gasless, partially fillable cross-chain swaps from EVM chains to EVM, Bitcoin
+and Solana, with no bridge and no custodian.**
 
 A user signs one EIP-712 message saying *"sell 1000 USDC on Ethereum for at
-least 0.25 ETH on Base"*. Resolvers compete in a Dutch auction to fill it,
-possibly in several pieces, and the user receives ETH on Base without sending
-a single transaction on either chain. Settlement is enforced by hash
-time-locked contracts, so either both legs of every fill happen or neither does.
+least 0.25 ETH on Base"*, or *"…for native BTC"*, or *"…for native SOL"*.
+Resolvers compete in a Dutch auction to fill it, possibly in several pieces.
+Settlement is enforced by hash time-locked contracts on every chain, all locked
+behind the same `sha256` secret, so either both legs of every fill happen or
+neither does.
 
 | | |
 |---|---|
-| **On-chain** (Solidity / Foundry) | `HashLock` HTLC · `PactumIntents` signed orders, Dutch auction, Merkle-committed partial fills · `SecretRelay` Chainlink CCIP auto-settlement |
-| **Off-chain** (Rust / alloy / tokio / axum) | `pactum-core` protocol math · `pactum-relay` untrusted order relay · `pactum-node` maker agent, resolver, keeper and `pactum` CLI |
+| **EVM** (Solidity / Foundry) | `HashLock` HTLC · `PactumIntents` signed orders, Dutch auction, Merkle-committed partial fills · `SecretRelay` Chainlink CCIP auto-settlement |
+| **Bitcoin** (Rust / rust-bitcoin) | Taproot HTLC: script-path only, `OP_SIZE 32` + `sha256` redeem leaf, absolute `OP_CHECKLOCKTIMEVERIFY` refund leaf |
+| **Solana** (native program) | PDA escrows per swap; permissionless redeem to a fixed redeemer; Unix-time refunds |
+| **Off-chain** (Rust / alloy / tokio / axum) | `pactum-core` protocol math · `pactum-relay` untrusted order relay · `pactum-btc` / `pactum-sol` chain clients · `pactum-node` maker agent, resolver, keeper and `pactum` CLI |
 
 ## How an intent settles
 
@@ -95,6 +99,42 @@ and pays a fixed address (fuzzed in `testFuzz_forgedMessagesCannotMisdirectFunds
 Each entry gets a fixed gas budget, so one hostile redeemer can't starve the rest
 of a batch, and an under-funded delivery reverts so CCIP can re-execute it.
 
+## Beyond EVM: Bitcoin and Solana
+
+Orders are chain-agnostic. `receiver` and `dstToken` are 32-byte words: a
+left-padded EVM address, a Solana pubkey, or a Bitcoin x-only key. EVM chains
+use their chain id as `dstChainId`; Bitcoin and Solana use
+`keccak256(CAIP-2 id)`, which can't collide with a real EVM id
+([`chains.rs`](crates/pactum-core/src/chains.rs)).
+
+|  | EVM destination | Bitcoin destination | Solana destination |
+|---|---|---|---|
+| Counter-lock | `HashLock.initiate` | Taproot HTLC output | `pactum-solana` escrow PDA |
+| How the maker finds it | `Initiated` events | relay announcement, verified on chain | relay announcement, verified on chain |
+| Who claims for the maker | the resolver (permissionless redeem) | **the maker** (the redeem leaf needs the maker's signature) | the resolver (permissionless redeem) |
+| Maker pays fees | never | the claim fee, taken out of the HTLC itself | never |
+| How the resolver learns the secret | relay / `Redeemed` event | the maker's claim witness, read from Bitcoin | relay / the escrow account |
+| Refund clock | block timestamp | Unix-time `OP_CLTV` against median-time-past | `Clock::unix_timestamp` |
+
+Design points worth knowing:
+- **Every chain accepts only 32-byte secrets.** Bitcoin scripts enforce
+  `OP_SIZE 32`. If any leg accepted a longer preimage, a maker could pick a
+  secret that unlocks the EVM leg but can never unlock the Bitcoin leg.
+- **Bitcoin refunds use absolute time, not block counts.** A relative `CSV`
+  lock drifts against the EVM leg's wall-clock expiry, and slow blocks would let
+  the maker refund on EVM *and* claim the BTC. The refund lock is set to
+  `src_expiry - safety_window - MTP_LAG_SECS`, since Bitcoin checks
+  timestamps against median-time-past, which trails wall time.
+- **The Bitcoin redeem leaf needs the maker's signature**, not just the secret.
+  Otherwise anyone who saw the secret in the mempool could race the claim to
+  their own address.
+- **The Solana client is SDK-free.** `pactum-sol` encodes legacy transactions,
+  derives PDAs and signs with ed25519 directly against the wire format, and is
+  validated against a real `solana-test-validator`.
+
+Native assets only for now (BTC, SOL); SPL tokens and BTC→EVM (maker locking
+BTC first) are on the roadmap.
+
 ## Security model
 
 | Threat | Why it fails |
@@ -108,6 +148,8 @@ of a batch, and an under-funded delivery reverts so CCIP can re-execute it.
 | Smart-contract wallet makers | EIP-1271 (and EIP-7702 delegated EOAs) for fills and instant refunds |
 | A resolver abandons a fill | Keeper refunds after expiry; the resolver forfeits 90% of its deposit to the maker |
 | MEV takes a resolver's deposit by redeeming first | Deposits are credited to the swap's redeemer, not the caller |
+| Resolver opens a counter-lock that expires minutes later, refunds it after the secret is revealed | Makers require `min_follower_lock` of remaining time before releasing, and redeem a released lock themselves if the resolver leaves it open too long |
+| Secret of the wrong length unlocks one chain but not another | 32-byte secrets enforced in Solidity, the Bitcoin script, the Solana program and the relay |
 | Cross-chain replay | Swap ids and the EIP-712 domain commit to `chainid` and contract address |
 | Non-standard ERC20s | `SafeTransfer` handles USDT-style tokens that return nothing |
 
@@ -120,8 +162,9 @@ recorded in [SECURITY.md](SECURITY.md).
 ## Testing
 
 ```
-forge test        115 Solidity tests: unit, fuzz, stateful invariants, audit regressions
-cargo test        Rust unit + HTTP tests, plus three two-chain e2e scenarios on anvil
+forge test        116 Solidity tests: unit, fuzz, stateful invariants, audit regressions
+cargo test        48 Rust tests: unit, HTTP, Bitcoin Core regtest, solana-test-validator,
+                  and seven cross-chain e2e scenarios
 ```
 
 Highlights:
@@ -136,7 +179,11 @@ Highlights:
     the maker's transaction count is **0 on both chains**;
   - a rogue resolver abandons a fill, and a keeper refunds the maker for its tip
     while the maker is credited 90% of the forfeited deposit;
-  - a resolver crashes mid-swap and a fresh process settles from its state file.
+  - a resolver crashes mid-swap and a fresh process settles from its state file;
+  - **USDC on EVM → native BTC** against a real Bitcoin Core node (regtest);
+  - **USDC on EVM → native SOL** against a real `solana-test-validator`, where
+    the maker's Solana account doesn't exist until the SOL arrives;
+  - two regression scenarios for the short-counter-lock attack and its rescue.
 
 ## Layout
 
@@ -149,8 +196,13 @@ src/
   interfaces/IERC20Permit.sol
   ccip/SecretRelay.sol       Chainlink CCIP app for automatic settlement
   ccip/Client.sol            CCIP message types (layout-compatible with Chainlink)
+programs/
+  pactum-solana/             native Solana HTLC program (cargo-build-sbf)
 crates/
-  pactum-core/               orders, EIP-712, secret trees, auction, timelocks
+  pactum-core/               orders, EIP-712, secret trees, auction, timelocks,
+                             CAIP-2 chain registry
+  pactum-btc/                Taproot HTLC + Bitcoin Core RPC
+  pactum-sol/                SDK-free Solana client: tx encoding, PDAs, RPC
   pactum-relay/              axum relay server + reqwest client
   pactum-node/               alloy chain adapter, Maker, IntentFiller, Keeper,
                              crash-safe state, and the `pactum` CLI
@@ -160,12 +212,17 @@ test/                        Foundry unit, fuzz, invariant and e2e tests
 
 ## Running it
 
-Requires [Foundry](https://getfoundry.sh) and Rust 1.85+.
+Requires [Foundry](https://getfoundry.sh), Rust 1.85+ and Docker (for the
+Bitcoin Core and Solana validator tests).
 
 ```bash
 git clone --recursive https://github.com/shaikyajash/pactum && cd pactum
+make solana   # builds the Solana toolchain image and the SBF program
 make test
 ```
+
+The Solana image is pinned to Agave 2.3 because 3.x requires `io_uring`, which
+Docker's x86 emulation on Apple Silicon doesn't provide.
 
 Deploy (same address on every chain):
 
@@ -197,10 +254,12 @@ KEEPER_KEY=0x... cargo run --release -- keeper -c config.json
 - [x] EIP-2612 permits, so the maker never sends a transaction
 - [x] Persistent maker and resolver state
 - [x] Chainlink CCIP secret relay
-- [ ] Testnet deployments (Sepolia, Base Sepolia, Arbitrum Sepolia)
+- [x] Native BTC and SOL destinations
+- [ ] SPL tokens on Solana
+- [ ] BTC → EVM (maker funds a Bitcoin HTLC first)
+- [ ] Testnet deployments (Sepolia, Base Sepolia, Bitcoin testnet4, Solana devnet)
 - [ ] Permit2 for tokens without EIP-2612
 - [ ] Route secrets through `SecretRelay` from the resolver daemon
-- [ ] Bitcoin leg via P2WSH HTLC scripts
 
 ## License
 
