@@ -14,7 +14,7 @@ use pactum_core::{
 use pactum_relay::{RelayClient, SecretRelease, SignedOrder};
 use tracing::info;
 
-use crate::{Chain, store::JsonStore};
+use crate::{Chain, btc::BtcLeg, store::JsonStore};
 
 #[derive(Clone, Debug)]
 pub struct IntentRequest {
@@ -101,7 +101,9 @@ impl From<SavedIntent> for OpenIntent {
 /// fill's secret. The maker never sends a transaction.
 pub struct Maker {
     pub src: Chain,
-    pub dst: Chain,
+    /// EVM destination; `None` when selling into Bitcoin
+    pub dst: Option<Chain>,
+    btc: Option<BtcLeg>,
     signer: PrivateKeySigner,
     relay: RelayClient,
     policy: TimelockPolicy,
@@ -110,7 +112,37 @@ pub struct Maker {
 
 impl Maker {
     pub fn new(src: Chain, dst: Chain, signer: PrivateKeySigner, relay: RelayClient) -> Self {
-        Self { src, dst, signer, relay, policy: TimelockPolicy::default(), store: None }
+        Self {
+            src,
+            dst: Some(dst),
+            btc: None,
+            signer,
+            relay,
+            policy: TimelockPolicy::default(),
+            store: None,
+        }
+    }
+
+    /// A maker selling on `src` for native BTC, received by `leg`'s key.
+    pub fn to_bitcoin(
+        src: Chain,
+        leg: BtcLeg,
+        signer: PrivateKeySigner,
+        relay: RelayClient,
+    ) -> Self {
+        Self {
+            src,
+            dst: None,
+            btc: Some(leg),
+            signer,
+            relay,
+            policy: TimelockPolicy::default(),
+            store: None,
+        }
+    }
+
+    fn evm_dst(&self) -> anyhow::Result<&Chain> {
+        self.dst.as_ref().ok_or_else(|| anyhow::anyhow!("no EVM destination"))
     }
 
     /// Persist the intent (including its secrets) to `path`.
@@ -147,10 +179,17 @@ impl Maker {
         let maker = self.signer.address();
         let order = Order {
             maker,
-            receiver: req.receiver.unwrap_or(evm_to_word(maker)),
+            receiver: req.receiver.unwrap_or(match &self.btc {
+                Some(btc) => btc.receiver_word(),
+                None => evm_to_word(maker),
+            }),
             srcToken: req.src_token,
             srcAmount: req.src_amount,
-            dstChainId: U256::from(self.dst.id),
+            dstChainId: match (&self.btc, &self.dst) {
+                (Some(btc), _) => btc.kind().chain_id(),
+                (None, Some(dst)) => U256::from(dst.id),
+                (None, None) => anyhow::bail!("maker has no destination"),
+            },
             dstToken: req.dst_token,
             startDstAmount: req.start_dst_amount,
             endDstAmount: req.end_dst_amount,
@@ -183,7 +222,10 @@ impl Maker {
             secrets,
             released: HashSet::new(),
             src_from: self.src.head().await?,
-            dst_from: self.dst.head().await?,
+            dst_from: match &self.dst {
+                Some(dst) => dst.head().await?,
+                None => 0,
+            },
         };
         // save before posting: once the order is public it can be filled, and
         // losing the secrets then would strand every fill until it times out
@@ -223,13 +265,17 @@ impl Maker {
 
     /// Release secrets for fills whose destination lock checks out.
     pub async fn tick(&self, intent: &mut OpenIntent) -> anyhow::Result<()> {
+        if let Some(btc) = &self.btc {
+            return self.tick_bitcoin(btc, intent).await;
+        }
+        let dst = self.evm_dst()?;
         let fills = intent_fills(self, intent).await?;
         let (Some(receiver), Some(dst_token)) =
             (word_to_evm(intent.order.receiver), word_to_evm(intent.order.dstToken))
         else {
             anyhow::bail!("destination is not an EVM chain");
         };
-        let locks = self.dst.locks_to(receiver, intent.dst_from, self.dst.head().await?).await?;
+        let locks = dst.locks_to(receiver, intent.dst_from, dst.head().await?).await?;
 
         for f in fills {
             if intent.released.contains(&f.secret_index) {
@@ -248,7 +294,7 @@ impl Maker {
             });
             // no valid counter-lock yet: keep the secret
             let Some(lock) = lock else { continue };
-            if self.dst.escrow(lock.swap_id).await?.settled {
+            if dst.escrow(lock.swap_id).await?.settled {
                 continue;
             }
 
@@ -267,6 +313,48 @@ impl Maker {
 }
 
 impl Maker {
+    /// For each fill, verify the resolver's announced Bitcoin HTLC on-chain and
+    /// claim it. Claiming reveals the secret on Bitcoin, which is what pays the
+    /// resolver on the source chain; we also publish it to the relay.
+    async fn tick_bitcoin(&self, btc: &BtcLeg, intent: &mut OpenIntent) -> anyhow::Result<()> {
+        let fills = intent_fills(self, intent).await?;
+        let announced = self.relay.locks(intent.hash).await?;
+        let now = self.src.now().await?;
+
+        for f in fills {
+            if intent.released.contains(&f.secret_index) {
+                continue;
+            }
+            let Some(secret) = intent.secrets.secrets.get(f.secret_index) else { continue };
+            let owed_sats = u64::try_from(f.owed)?;
+
+            for ann in announced.iter().filter(|a| a.index() == f.secret_index) {
+                let lock = match btc
+                    .verify(ann, secret.hash, owed_sats, now, self.policy.min_follower_lock)
+                    .await
+                {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        tracing::debug!(index = f.secret_index, "lock rejected: {e:#}");
+                        continue;
+                    }
+                };
+                btc.claim(&lock, &secret.secret).await?;
+                let release = SecretRelease {
+                    index: f.secret_index,
+                    secret: secret.secret.clone(),
+                    proof: intent.secrets.tree.proof(f.secret_index),
+                };
+                self.relay.release(intent.hash, &release).await?;
+                intent.released.insert(f.secret_index);
+                self.persist(intent)?;
+                info!(order = %intent.hash, index = f.secret_index, outpoint = %lock.outpoint, "claimed BTC");
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// True once the order is fully filled and every fill's secret is released.
     /// Split orders may skip buckets, so this is not "all secrets released".
     pub async fn is_complete(&self, intent: &OpenIntent) -> anyhow::Result<bool> {
