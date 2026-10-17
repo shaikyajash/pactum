@@ -14,7 +14,7 @@ use pactum_core::{
 use pactum_relay::{RelayClient, SecretRelease, SignedOrder};
 use tracing::info;
 
-use crate::{Chain, btc::BtcLeg, store::JsonStore};
+use crate::{Chain, btc::BtcLeg, sol::SolLeg, store::JsonStore};
 
 #[derive(Clone, Debug)]
 pub struct IntentRequest {
@@ -104,6 +104,7 @@ pub struct Maker {
     /// EVM destination; `None` when selling into Bitcoin
     pub dst: Option<Chain>,
     btc: Option<BtcLeg>,
+    sol: Option<SolLeg>,
     signer: PrivateKeySigner,
     relay: RelayClient,
     policy: TimelockPolicy,
@@ -116,6 +117,7 @@ impl Maker {
             src,
             dst: Some(dst),
             btc: None,
+            sol: None,
             signer,
             relay,
             policy: TimelockPolicy::default(),
@@ -134,6 +136,26 @@ impl Maker {
             src,
             dst: None,
             btc: Some(leg),
+            sol: None,
+            signer,
+            relay,
+            policy: TimelockPolicy::default(),
+            store: None,
+        }
+    }
+
+    /// A maker selling on `src` for native SOL, received by `leg`'s key.
+    pub fn to_solana(
+        src: Chain,
+        leg: SolLeg,
+        signer: PrivateKeySigner,
+        relay: RelayClient,
+    ) -> Self {
+        Self {
+            src,
+            dst: None,
+            btc: None,
+            sol: Some(leg),
             signer,
             relay,
             policy: TimelockPolicy::default(),
@@ -179,16 +201,18 @@ impl Maker {
         let maker = self.signer.address();
         let order = Order {
             maker,
-            receiver: req.receiver.unwrap_or(match &self.btc {
-                Some(btc) => btc.receiver_word(),
-                None => evm_to_word(maker),
+            receiver: req.receiver.unwrap_or(match (&self.btc, &self.sol) {
+                (Some(btc), _) => btc.receiver_word(),
+                (_, Some(sol)) => sol.receiver_word(),
+                _ => evm_to_word(maker),
             }),
             srcToken: req.src_token,
             srcAmount: req.src_amount,
-            dstChainId: match (&self.btc, &self.dst) {
-                (Some(btc), _) => btc.kind().chain_id(),
-                (None, Some(dst)) => U256::from(dst.id),
-                (None, None) => anyhow::bail!("maker has no destination"),
+            dstChainId: match (&self.btc, &self.sol, &self.dst) {
+                (Some(btc), ..) => btc.kind().chain_id(),
+                (_, Some(sol), _) => sol.kind().chain_id(),
+                (.., Some(dst)) => U256::from(dst.id),
+                (None, None, None) => anyhow::bail!("maker has no destination"),
             },
             dstToken: req.dst_token,
             startDstAmount: req.start_dst_amount,
@@ -267,6 +291,9 @@ impl Maker {
     pub async fn tick(&self, intent: &mut OpenIntent) -> anyhow::Result<()> {
         if let Some(btc) = &self.btc {
             return self.tick_bitcoin(btc, intent).await;
+        }
+        if let Some(sol) = &self.sol {
+            return self.tick_solana(sol, intent).await;
         }
         let dst = self.evm_dst()?;
         let fills = intent_fills(self, intent).await?;
@@ -351,6 +378,46 @@ impl Maker {
                 info!(order = %intent.hash, index = f.secret_index, outpoint = %lock.outpoint, "claimed BTC");
                 break;
             }
+        }
+        Ok(())
+    }
+
+    /// Verify each fill's announced Solana escrow and release its secret; the
+    /// resolver then redeems the escrow to us, so we need no SOL for fees.
+    async fn tick_solana(&self, sol: &SolLeg, intent: &mut OpenIntent) -> anyhow::Result<()> {
+        let fills = intent_fills(self, intent).await?;
+        let announced = self.relay.locks(intent.hash).await?;
+
+        for f in fills {
+            if intent.released.contains(&f.secret_index) {
+                continue;
+            }
+            let Some(secret) = intent.secrets.secrets.get(f.secret_index) else { continue };
+            let src_expiry = self.src.escrow(f.swap_id).await?.expiry;
+            let owed = u64::try_from(f.owed)?;
+
+            let mut ok = false;
+            for ann in announced.iter().filter(|a| a.index() == f.secret_index) {
+                match sol.verify(ann, secret.hash, owed, src_expiry, &self.policy).await {
+                    Ok(_) => {
+                        ok = true;
+                        break;
+                    }
+                    Err(e) => tracing::debug!(index = f.secret_index, "escrow rejected: {e:#}"),
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let release = SecretRelease {
+                index: f.secret_index,
+                secret: secret.secret.clone(),
+                proof: intent.secrets.tree.proof(f.secret_index),
+            };
+            self.relay.release(intent.hash, &release).await?;
+            intent.released.insert(f.secret_index);
+            self.persist(intent)?;
+            info!(order = %intent.hash, index = f.secret_index, "secret released for solana escrow");
         }
         Ok(())
     }
